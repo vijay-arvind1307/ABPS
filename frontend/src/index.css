@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-[#F4F6F9] text-slate-900 text-[13px] leading-snug;
+  }
+}
+
+/* CRIS / IR Operational Table and Card Styles */
+.cris-table {
+  @apply w-full border-collapse border border-slate-300 bg-white text-[12px];
+}
+
+.cris-table th {
+  @apply bg-[#0B2545] text-white font-semibold py-1.5 px-2 border border-slate-400 text-left text-[11px] uppercase tracking-wider;
+}
+
+.cris-table td {
+  @apply py-1.5 px-2 border border-slate-200 text-slate-800;
+}
+
+.cris-table tr:hover {
+  @apply bg-blue-50/60;
+}
+
+.cris-panel {
+  @apply bg-white border border-slate-300 rounded-none shadow-sm;
+}
+
+.cris-panel-header {
+  @apply bg-slate-100 border-b border-slate-300 px-3 py-1.5 font-bold text-slate-800 text-[12px] flex items-center justify-between uppercase tracking-wide;
+}
+
+.cris-btn {
+  @apply px-3 py-1 text-[12px] font-semibold rounded-none border transition-colors duration-150 flex items-center gap-1.5;
+}
+
+.cris-btn-primary {
+  @apply bg-[#134074] text-white border-[#0B2545] hover:bg-[#0B2545];
+}
+
+.cris-btn-accent {
+  @apply bg-[#FFB703] text-slate-900 border-amber-500 font-bold hover:bg-amber-400;
+}
+
+.cris-btn-danger {
+  @apply bg-[#D90429] text-white border-red-800 hover:bg-red-700;
+}
+
+.cris-btn-secondary {
+  @apply bg-slate-200 text-slate-800 border-slate-400 hover:bg-slate-300;
+}
+
+.badge-emergency {
+  @apply bg-red-600 text-white font-bold px-1.5 py-0.5 text-[10px] rounded-none inline-flex items-center gap-1;
+}
+
+.badge-critical {
+  @apply bg-amber-600 text-white font-semibold px-1.5 py-0.5 text-[10px] rounded-none;
+}
+
+.badge-high {
+  @apply bg-blue-600 text-white font-medium px-1.5 py-0.5 text-[10px] rounded-none;
+}
+
+.badge-normal {
+  @apply bg-slate-600 text-white font-normal px-1.5 py-0.5 text-[10px] rounded-none;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #E2E8F0;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #94A3B8;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748B;
+}

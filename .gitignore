@@ -1,0 +1,16 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+dist/
+dist-ssr/
+*.local
+venv/
+backend/.env
+venv/
