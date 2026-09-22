@@ -82,11 +82,11 @@ function RailwayMapInner({
       }));
   }, [stations]);
 
-  // Validate and sanitize movements (trains)
+  // Validate and sanitize movements (trains) - ONLY plot trains with verified live GPS telemetry
   const validMovements = useMemo(() => {
     if (!Array.isArray(movements)) return [];
     return movements
-      .filter((m) => m && isValidCoord(m.latitude, m.longitude))
+      .filter((m) => m && m.is_live && isValidCoord(m.latitude, m.longitude))
       .map((m) => ({
         ...m,
         train_number: String(m.train_number || 'UNKNOWN'),
@@ -219,7 +219,7 @@ function RailwayMapInner({
         </span>
       </div>
 
-      <div className="h-[440px] min-h-[420px] w-full relative bg-slate-100">
+      <div className="h-[75vh] min-h-[500px] w-full relative bg-slate-100">
         {/* Top-right Status Overlays */}
         {loading && (
           <div className="absolute top-2 right-2 bg-blue-900/90 text-white border border-blue-700 px-2.5 py-1 text-[10px] font-mono z-[1000] shadow-md flex items-center gap-1.5">
@@ -289,6 +289,14 @@ function RailwayMapInner({
               </div>
               <p className="text-[11px] text-slate-500 italic">The rest of the application remains available.</p>
             </div>
+          </div>
+        )}
+
+        {/* Informative notice if trains are scheduled but live GPS telemetry is unavailable */}
+        {movements.length > 0 && validMovements.length === 0 && (
+          <div className="absolute top-2 right-2 z-[900] bg-slate-900/90 text-amber-200 border border-amber-500/80 px-3 py-1.5 rounded text-[11px] font-mono shadow-md flex items-center gap-2 backdrop-blur-xs">
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+            <span>Live GPS telemetry unavailable — Tracking {movements.length} scheduled candidates</span>
           </div>
         )}
 

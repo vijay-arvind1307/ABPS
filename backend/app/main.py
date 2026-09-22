@@ -19,9 +19,12 @@ from app.routers import (
     execution_router,
     notifications_router,
     block_requests_router,
-    coordinated_block_plans_router
+    coordinated_block_plans_router,
+    live_router,
+    availability_router,
+    standard_api_router
 )
-from app.models.models import User, RailwayStation
+from app.models.models import User, RailwayStation, Train
 
 # Initialize database schema
 Base.metadata.create_all(bind=engine)
@@ -68,6 +71,13 @@ app.include_router(reports_router, prefix=settings.API_V1_STR)
 app.include_router(scenario_router, prefix=settings.API_V1_STR)
 app.include_router(stations_router, prefix=settings.API_V1_STR)
 app.include_router(stations_router)  # Also allow direct /stations paths
+app.include_router(live_router, prefix=settings.API_V1_STR)
+app.include_router(live_router)  # Allow direct /live paths
+app.include_router(availability_router, prefix=settings.API_V1_STR)
+app.include_router(availability_router)  # Allow direct /availability paths
+app.include_router(standard_api_router, prefix=settings.API_V1_STR)
+app.include_router(standard_api_router)  # Allow direct standard REST paths (/requests, /plans/..., etc.)
+
 
 from app.routers.block_requests import optimize_request_pool, PoolOptimizeRequest
 from app.routers.auth import get_current_user
@@ -120,6 +130,16 @@ def startup_event():
                     import_station_master(pdf_found)
             except Exception as e:
                 print(f"[STARTUP] Station Master auto-import notice: {e}")
+
+        # Check if train master is populated; if not, import railway documents
+        train_count = db.query(Train).count()
+        if train_count == 0:
+            try:
+                from app.scripts.import_railway_documents import run_import
+                print("[STARTUP] Auto-importing Railway Documents...")
+                run_import()
+            except Exception as e:
+                print(f"[STARTUP] Railway documents auto-import notice: {e}")
     finally:
         db.close()
 
@@ -140,13 +160,57 @@ def shutdown_event():
         print(f"[SHUTDOWN] Live poller shutdown notice: {e}")
 
 
+from sqlalchemy import text
+from datetime import datetime
+from fastapi import Response, status as http_status
+
 @app.get("/health")
 @app.get(f"{settings.API_V1_STR}/health")
-def health_check():
+def health_check(db: Session = Depends(get_db)):
+    db_status = "HEALTHY"
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as e:
+        db_status = f"UNHEALTHY: {str(e)}"
+
+    solver_status = "READY"
+    try:
+        from ortools.sat.python import cp_model
+        _m = cp_model.CpModel()
+        _s = cp_model.CpSolver()
+    except Exception as e:
+        solver_status = f"UNAVAILABLE: {str(e)}"
+
+    provider_status = "CONFIGURED" if settings.RAILRADAR_API_KEY else "NO_KEY (STATIC/DEMO READY)"
+
+    is_overall_healthy = (db_status == "HEALTHY" and solver_status == "READY")
     return {
-        "status": "HEALTHY",
+        "status": "HEALTHY" if is_overall_healthy else "DEGRADED",
         "service": "Railway Maintenance Block Planning System (IR-ABPS)",
-        "train_data_mode": settings.TRAIN_DATA_MODE,
-        "solver": "Google OR-Tools CP-SAT",
-        "safety_validator": "DeterministicHardSafetyValidator (15 Rules Active)"
+        "components": {
+            "database": db_status,
+            "optimizer": solver_status,
+            "live_train_provider": provider_status,
+            "train_data_mode": settings.TRAIN_DATA_MODE,
+        },
+        "safety_validator": "DeterministicHardSafetyValidator (15 Rules Active)",
+        "timestamp": datetime.utcnow().isoformat()
     }
+
+
+@app.get("/health/live")
+def health_liveness():
+    return {"status": "LIVE", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/health/ready")
+def health_readiness(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+        return {"status": "READY", "timestamp": datetime.utcnow().isoformat()}
+    except Exception as e:
+        return Response(
+            content=f'{{"status": "NOT_READY", "error": "{str(e)}"}}',
+            media_type="application/json",
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE
+        )

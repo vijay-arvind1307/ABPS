@@ -179,7 +179,23 @@ def seed_database(db: Session, drop_all: bool = False):
                 to_stn = db.query(Station).filter(Station.code == to_code).first()
                 if not from_stn or not to_stn:
                     continue
-                cid = corr_map.get(s_data.get("corridor_id"), corr_map["CORR_MDU_TEN"]).id
+                
+                # Check for specific MDU-TEN legacy sections
+                mdu_ten_canonical = {"SEC_MDU_TDN", "SEC_TDN_TMQ", "SEC_TMQ_VPT", "SEC_VPT_SRT", "SEC_SRT_CVP", "SEC_CVP_KDU", "SEC_KDU_MEJ", "SEC_MEJ_TEN", "SEC_MEJ_TN"}
+                if sec_id in mdu_ten_canonical and "CORR_MDU_TEN" in corr_map:
+                    cid = corr_map["CORR_MDU_TEN"].id
+                elif s_data.get("prototype_code") == "TRUNK" or s_data.get("corridor_id") == "CORR_SR_TRUNK":
+                    cid = corr_map.get("CORR_MAS_TPJ", corr_map.get("CORR_MAS_CBE", corr_map["CORR_MDU_TEN"])).id
+                else:
+                    c_found = db.query(Corridor).filter(
+                        (Corridor.prototype_code == s_data.get("prototype_code")) |
+                        (Corridor.corridor_id == s_data.get("corridor_id"))
+                    ).first()
+                    if c_found:
+                        cid = c_found.id
+                    else:
+                        cid = corr_map.get(s_data.get("corridor_id"), corr_map.get("CORR_C40_MDU_TEN", corr_map.get("CORR_MDU_TEN"))).id
+
                 sec = db.query(RailwaySection).filter(RailwaySection.section_id == sec_id).first()
                 if not sec:
                     sec = RailwaySection(
@@ -201,7 +217,7 @@ def seed_database(db: Session, drop_all: bool = False):
                     sec.corridor_id = cid
                     sec.from_station_id = from_stn.id
                     sec.to_station_id = to_stn.id
-                    sec.length_km = s_data["distance_km"]
+                    sec.length_km = s_data.get("distance_km") or s_data.get("length_km", 10.0)
                     sec.geometry_geojson = s_data.get("coordinates")
             db.commit()
 
@@ -227,6 +243,15 @@ def seed_database(db: Session, drop_all: bool = False):
             )
             db.add(res)
     db.commit()
+
+    # 7. Auto-seed SIH Canonical Maintenance Requests if empty
+    from app.models.models import MaintenanceJob
+    if db.query(MaintenanceJob).count() == 0:
+        try:
+            from seed_sih_canonical_requests import seed_sih_requests
+            seed_sih_requests()
+        except Exception as e:
+            print("[WARN] Canonical requests auto-seed notice:", e)
 
     print("[SUCCESS] Master Railway Infrastructure Seeded:")
     print(f"          - {len(master_departments)} Authorized Master Departments")

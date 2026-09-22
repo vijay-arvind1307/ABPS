@@ -11,3 +11,7 @@ from app.routers.trains import router as trains_router
 from app.routers.execution import router as execution_router
 from app.routers.block_requests import router as block_requests_router, coordinated_router as coordinated_block_plans_router
 from app.routers.notifications import router as notifications_router
+from app.routers.live import router as live_router
+from app.routers.availability import router as availability_router
+from app.routers.standard_api import router as standard_api_router
+

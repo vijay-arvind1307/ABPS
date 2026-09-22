@@ -290,9 +290,8 @@ export default function Header({ onTabChange, activeTab }) {
                   notifications.map((n) => (
                     <div
                       key={n.id}
-                      className={`p-2.5 hover:bg-blue-50/70 transition-colors flex items-start space-x-2.5 ${
-                        !n.is_read ? 'bg-amber-50/50 font-medium' : 'bg-white'
-                      }`}
+                      className={`p-2.5 hover:bg-blue-50/70 transition-colors flex items-start space-x-2.5 ${!n.is_read ? 'bg-amber-50/50 font-medium' : 'bg-white'
+                        }`}
                     >
                       {getNotifIcon(n.notification_type)}
                       <div className="flex-1 min-w-0">

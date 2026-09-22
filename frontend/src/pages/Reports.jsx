@@ -58,8 +58,8 @@ export default function Reports() {
               key={tab.id}
               onClick={() => setActiveSubTab(tab.id)}
               className={`px-3 py-1 text-xs font-bold uppercase border transition-colors ${activeSubTab === tab.id
-                  ? 'bg-[#134074] text-white border-[#0B2545] shadow-xs'
-                  : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
+                ? 'bg-[#134074] text-white border-[#0B2545] shadow-xs'
+                : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
                 }`}
             >
               {tab.label}

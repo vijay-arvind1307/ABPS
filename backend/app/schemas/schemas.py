@@ -145,6 +145,7 @@ class CorridorBase(BaseModel):
 class CorridorResponse(CorridorBase):
     id: int
     sections_count: Optional[int] = 0
+    stations_count: Optional[int] = 0
 
     class Config:
         from_attributes = True
@@ -836,6 +837,7 @@ class CoordinatedPlanDecisionRequest(BaseModel):
     recommended_start_min: Optional[int] = None
     recommended_end_min: Optional[int] = None
     recommended_section_id: Optional[int] = None
+    version: Optional[int] = None
 
 
 class CoordinatedPlanWhatIfRequest(BaseModel):

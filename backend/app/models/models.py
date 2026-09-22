@@ -217,10 +217,15 @@ class TrainSectionOccupancy(Base):
     id = Column(Integer, primary_key=True, index=True)
     train_number = Column(String(20), ForeignKey("trains.train_number"), nullable=False)
     section_id = Column(Integer, ForeignKey("railway_sections.id"), nullable=False)
+    journey_date = Column(DateTime, nullable=True)
+    entry_time = Column(DateTime, nullable=True)
+    exit_time = Column(DateTime, nullable=True)
     estimated_entry_min = Column(Integer, nullable=False)
     estimated_exit_min = Column(Integer, nullable=False)
     confidence = Column(Float, default=0.95)
-    source = Column(String(30), default="calculated")
+    is_live = Column(Boolean, default=False)
+    source = Column(String(30), default="calculated")  # SCHEDULED, LIVE, ESTIMATED, UNAVAILABLE
+    last_updated = Column(DateTime, default=datetime.utcnow)
     calculated_at = Column(DateTime, default=datetime.utcnow)
 
     train = relationship("Train")
@@ -509,6 +514,7 @@ class CoordinatedBlockPlan(Base):
     planner_reason = Column(Text, nullable=True)
     rejection_reason = Column(Text, nullable=True)
     modification_reason = Column(Text, nullable=True)
+    version = Column(Integer, default=1, nullable=False)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -658,3 +664,17 @@ class SystemConfig(Base):
     value = Column(String(255), nullable=False)
     description = Column(String(255), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class APIHealthStatus(Base):
+    __tablename__ = "api_health_status"
+
+    id = Column(Integer, primary_key=True, index=True)
+    provider = Column(String(50), unique=True, index=True, nullable=False, default="RailRadar")
+    status = Column(String(30), nullable=False, default="AVAILABLE")  # AVAILABLE, DEGRADED, RATE_LIMITED, UNAUTHORIZED, NOT_FOUND, SERVICE_UNAVAILABLE, TIMEOUT, UNAVAILABLE
+    last_success = Column(DateTime, nullable=True)
+    last_failure = Column(DateTime, nullable=True)
+    failure_reason = Column(Text, nullable=True)
+    retry_after = Column(DateTime, nullable=True)
+    checked_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+

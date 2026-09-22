@@ -89,6 +89,74 @@ class RailwayNetworkService:
         return cls._network_data.get("stations", {}).get(c)
 
     @classmethod
+    def get_corridor(cls, ident: str) -> Optional[Dict[str, Any]]:
+        cls._load_network()
+        corridors = cls._network_data.get("corridors", {})
+        norm = (ident or "").strip().upper()
+        if norm in corridors:
+            return corridors[norm]
+        for c in corridors.values():
+            if c.get("corridor_id") == norm or c.get("prototype_code") == norm:
+                return c
+        return None
+
+    @classmethod
+    def get_all_corridors(cls) -> Dict[str, Any]:
+        cls._load_network()
+        return cls._network_data.get("corridors", {})
+
+    @classmethod
+    def get_corridor_geometry(cls, ident: str) -> Optional[Dict[str, Any]]:
+        corr = cls.get_corridor(ident)
+        if not corr:
+            return None
+        return {
+            "type": "Feature",
+            "properties": {
+                "corridor_id": corr["corridor_id"],
+                "prototype_code": corr["prototype_code"],
+                "name": corr["name"],
+                "division": corr["division"],
+                "start_station_code": corr.get("start_station_code", corr["stations"][0] if corr.get("stations") else ""),
+                "end_station_code": corr.get("end_station_code", corr["stations"][-1] if corr.get("stations") else ""),
+                "total_distance_km": corr["total_distance_km"],
+                "stations_count": corr["stations_count"],
+                "sections_count": corr["sections_count"],
+                "points_count": corr["points_count"]
+            },
+            "geometry": corr["geometry"],
+            "leaflet_latlngs": corr["leaflet_latlngs"],
+            "stations": corr["stations"],
+            "sections": corr["sections"],
+            "station_nodes": [
+                {
+                    "code": s_code,
+                    "station_code": s_code,
+                    "name": cls._network_data.get("stations", {}).get(s_code, {}).get("name", s_code),
+                    "station_name": cls._network_data.get("stations", {}).get(s_code, {}).get("name", s_code),
+                    "latitude": cls._network_data.get("stations", {}).get(s_code, {}).get("latitude"),
+                    "longitude": cls._network_data.get("stations", {}).get(s_code, {}).get("longitude"),
+                    "sequence": idx + 1,
+                    "division": cls._network_data.get("stations", {}).get(s_code, {}).get("division", corr.get("division", "SR"))
+                }
+                for idx, s_code in enumerate(corr.get("stations", []))
+                if cls._network_data.get("stations", {}).get(s_code)
+            ],
+            "section_nodes": [
+                {
+                    "section_id": sec_id,
+                    "name": cls._network_data.get("sections", {}).get(sec_id, {}).get("name", sec_id),
+                    "from_station_code": cls._network_data.get("sections", {}).get(sec_id, {}).get("from_station_code"),
+                    "to_station_code": cls._network_data.get("sections", {}).get(sec_id, {}).get("to_station_code"),
+                    "length_km": cls._network_data.get("sections", {}).get(sec_id, {}).get("distance_km", 10.0),
+                    "coordinates": cls._network_data.get("sections", {}).get(sec_id, {}).get("coordinates", [])
+                }
+                for sec_id in corr.get("sections", [])
+                if cls._network_data.get("sections", {}).get(sec_id)
+            ]
+        }
+
+    @classmethod
     def calculate_railway_route(
         cls,
         start_code: str,

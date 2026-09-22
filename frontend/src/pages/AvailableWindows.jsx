@@ -68,12 +68,14 @@ export default function AvailableWindows() {
               onChange={handleCorridorChange}
               className="text-[11px] font-bold bg-white border border-slate-300 px-2 py-0.5 cursor-pointer text-slate-900"
             >
-              <option value="">[ ALL ACTIVE CORRIDORS ]</option>
-              {corridors.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name} | {c.start_station_code} ↔ {c.end_station_code} ({c.total_distance_km} km)
-                </option>
-              ))}
+              <option value="">[ ALL ACTIVE CORRIDORS (C01–C46) ]</option>
+              {corridors
+                .filter(c => c.prototype_code && /^C(0[1-9]|[1-3][0-9]|4[0-6])$/.test(c.prototype_code))
+                .map((c) => (
+                  <option key={c.id} value={c.id}>
+                    [{c.prototype_code}] {c.name}
+                  </option>
+                ))}
             </select>
           </div>
 

@@ -33,104 +33,179 @@ class PriorityEngine:
     }
 
     @classmethod
+    @classmethod
     def calculate_criticality(
         cls,
         work_type: str,
         department_code: str = "ENGG",
         user_priority: str = "MEDIUM",
-        is_emergency: bool = False
-    ) -> Tuple[float, str, str]:
+        is_emergency: bool = False,
+        asset_condition_score: Optional[float] = None,
+        failure_consequence_score: Optional[float] = None,
+        operational_importance_score: Optional[float] = None
+    ) -> Tuple[float, str, str, Dict[str, Any]]:
         """
-        Calculates deterministic Criticality score (0-100) and rating based on asset and work criticality.
-        Returns: (score, label, reason)
+        Calculates deterministic Criticality score (0-100) based on explainable sub-factors:
+        Criticality = Condition Score * 0.35 + Failure Consequence * 0.35 + Operational Importance * 0.30
+        Returns: (score, label, reason, sub_factors_dict)
         """
         wt = (work_type or "").upper()
-        dept = (department_code or "").upper()
+        prio = (user_priority or "MEDIUM").upper()
 
         if is_emergency:
-            return 95.0, "CRITICAL", "Emergency declaration / immediate railway infrastructure failure risk"
+            sub = {
+                "condition_score": 95.0,
+                "failure_consequence_score": 95.0,
+                "operational_importance_score": 95.0,
+                "criticality_score": 95.0,
+                "calculation_version": "v2.0-deterministic"
+            }
+            return 95.0, "CRITICAL", "Emergency declaration / immediate railway infrastructure failure risk", sub
 
-        # 1. Critical Tier (Safety-critical assets, track defects, signal protection, OHE drops)
-        if any(term in wt for term in ["FRACTURE", "DEFECT", "WELD_REPAIR", "TURNOUT_RENEWAL", "RAIL_REPLACEMENT", "INTERLOCKING", "POINT_MACHINE", "TRANSFORMER"]):
-            base = 88.0
-            label = "CRITICAL" if base >= 90 else "HIGH"
-            reason = "Safety-critical track/signalling asset with direct operational integrity impact"
-        elif any(term in wt for term in ["TAMPING", "BALLAST_CLEANING", "SURFACING", "POINT_OVERHAUL", "OHE_POWER_BLOCK", "CANTILEVER", "TRACK_CIRCUIT"]):
-            base = 76.0
-            label = "HIGH"
-            reason = "Major operational infrastructure requiring mechanized corridor possession"
-        elif any(term in wt for term in ["INSPECTION", "CALIBRATION", "MEGGERING", "TEST", "ANNUAL_MAINTENANCE"]):
-            base = 55.0
-            label = "MEDIUM"
-            reason = "Routine scheduled preventive inspection / maintenance procedure"
+        # Derive sub-factors deterministically from asset condition, failure consequence, and operational importance
+        if asset_condition_score is not None:
+            c_cond = min(100.0, max(10.0, float(asset_condition_score)))
         else:
-            base = 40.0
-            label = "LOW"
-            reason = "Standard non-urgent administrative / wayside maintenance"
+            if any(term in wt for term in ["FRACTURE", "DEFECT", "WELD_REPAIR", "RAIL_REPLACEMENT"]):
+                c_cond = 88.0
+            elif any(term in wt for term in ["TAMPING", "BALLAST", "SURFACING", "POINT_OVERHAUL", "OHE_POWER_BLOCK"]):
+                c_cond = 80.0
+            elif any(term in wt for term in ["INSPECTION", "CALIBRATION", "MEGGERING", "TEST"]):
+                c_cond = 60.0
+            else:
+                c_cond = 45.0
 
-        # Apply User Priority modifier (+6 for HIGH, -6 for LOW)
-        prio = (user_priority or "MEDIUM").upper()
-        if prio == "HIGH":
-            base += 6.0
-        elif prio == "LOW":
-            base -= 6.0
+        if failure_consequence_score is not None:
+            c_cons = min(100.0, max(10.0, float(failure_consequence_score)))
+        else:
+            if any(term in wt for term in ["FRACTURE", "DEFECT", "INTERLOCKING", "POINT_MACHINE", "TRANSFORMER"]):
+                c_cons = 90.0
+            elif any(term in wt for term in ["TAMPING", "BALLAST_CLEANING", "SURFACING", "POINT_OVERHAUL", "OHE_POWER_BLOCK", "CANTILEVER"]):
+                c_cons = 75.0
+            elif any(term in wt for term in ["INSPECTION", "TEST", "CALIBRATION"]):
+                c_cons = 55.0
+            else:
+                c_cons = 40.0
 
-        score = round(min(100.0, max(10.0, base)), 1)
-        if score >= 90.0:
+        if operational_importance_score is not None:
+            c_imp = min(100.0, max(10.0, float(operational_importance_score)))
+        else:
+            c_imp = 85.0 if prio == "HIGH" else (55.0 if prio == "LOW" else 70.0)
+
+        # Multi-factor formula:
+        # Criticality = 35% Asset Condition + 35% Failure Consequence + 30% Operational Importance
+        calculated_crit = round(0.35 * c_cond + 0.35 * c_cons + 0.30 * c_imp, 1)
+
+        sub = {
+            "condition_score": c_cond,
+            "failure_consequence_score": c_cons,
+            "operational_importance_score": c_imp,
+            "criticality_score": calculated_crit,
+            "calculation_version": "v2.0-deterministic"
+        }
+
+        if calculated_crit >= 90.0:
             label = "CRITICAL"
-        elif score >= 70.0:
+        elif calculated_crit >= 70.0:
             label = "HIGH"
-        elif score >= 50.0:
+        elif calculated_crit >= 50.0:
             label = "MEDIUM"
         else:
             label = "LOW"
 
-        return score, label, reason
+        reason = f"{label} criticality: Condition {c_cond} (35%) + Consequence {c_cons} (35%) + Importance {c_imp} (30%)"
+        return calculated_crit, label, reason, sub
 
     @classmethod
     def calculate_safety_impact(
         cls,
         work_type: str,
         department_code: str = "ENGG",
-        is_emergency: bool = False
-    ) -> Tuple[float, str, str]:
+        is_emergency: bool = False,
+        safety_consequence_score: Optional[float] = None,
+        train_operation_safety_score: Optional[float] = None,
+        failure_severity_score: Optional[float] = None,
+        mitigation_score: Optional[float] = None
+    ) -> Tuple[float, str, str, Dict[str, Any]]:
         """
-        Calculates deterministic Safety Impact score (0-100) and rating.
-        Returns: (score, label, reason)
+        Calculates deterministic Safety Impact score (0-100) based on explainable sub-factors:
+        Safety = Safety Consequence * 0.40 + Train Operation Impact * 0.35 + Failure Severity * 0.25
+        Returns: (score, label, reason, sub_factors_dict)
         """
         wt = (work_type or "").upper()
-        dept = (department_code or "").upper()
 
         if is_emergency:
-            return 95.0, "HIGH", "Immediate safety risk to passenger and freight train operations"
+            sub = {
+                "safety_consequence_score": 95.0,
+                "train_operation_safety_score": 95.0,
+                "failure_severity_score": 95.0,
+                "mitigation_score": 60.0,
+                "safety_score": 95.0,
+                "calculation_version": "v2.0-deterministic"
+            }
+            return 95.0, "HIGH", "Immediate safety risk to passenger and freight train operations", sub
 
-        # Signal protection, 25kV traction hazards, rail defects carry highest safety impact
-        if any(term in wt for term in ["FRACTURE", "DEFECT", "RAIL_REPLACEMENT", "POINT_MACHINE", "INTERLOCKING", "OHE_POWER_BLOCK"]):
-            base = 90.0
-            label = "HIGH"
-            reason = "High safety impact: failure poses derailment, signal failure or electrical hazard"
-        elif any(term in wt for term in ["TAMPING", "SURFACING", "POINT_OVERHAUL", "TRACK_CIRCUIT", "AXLE_COUNTER", "CANTILEVER"]):
-            base = 78.0
-            label = "HIGH"
-            reason = "Significant safety impact: affects track geometry, block section clearance, or pantograph contact"
-        elif any(term in wt for term in ["INSPECTION", "BONDING", "MEGGERING", "INSULATOR", "CALIBRATION"]):
-            base = 52.0
-            label = "MEDIUM"
-            reason = "Moderate safety impact: regular periodic safety verification"
+        # Derive explainable safety sub-factors
+        if safety_consequence_score is not None:
+            s_cons = min(100.0, max(10.0, float(safety_consequence_score)))
         else:
-            base = 30.0
-            label = "LOW"
-            reason = "Low safety impact: auxiliary infrastructure maintenance"
+            if any(term in wt for term in ["FRACTURE", "DEFECT", "RAIL_REPLACEMENT", "INTERLOCKING", "OHE_POWER_BLOCK"]):
+                s_cons = 92.0
+            elif any(term in wt for term in ["TAMPING", "SURFACING", "POINT_OVERHAUL", "TRACK_CIRCUIT", "AXLE_COUNTER", "CANTILEVER"]):
+                s_cons = 82.0
+            elif any(term in wt for term in ["INSPECTION", "BONDING", "MEGGERING"]):
+                s_cons = 55.0
+            else:
+                s_cons = 35.0
 
-        score = round(min(100.0, max(10.0, base)), 1)
-        if score >= 70.0:
+        if train_operation_safety_score is not None:
+            s_train = min(100.0, max(10.0, float(train_operation_safety_score)))
+        else:
+            if any(term in wt for term in ["FRACTURE", "DEFECT", "RAIL_REPLACEMENT"]):
+                s_train = 90.0
+            elif any(term in wt for term in ["TAMPING", "SURFACING", "POINT_MACHINE", "OHE_POWER_BLOCK"]):
+                s_train = 79.0
+            elif any(term in wt for term in ["INSPECTION", "TEST", "CALIBRATION"]):
+                s_train = 50.0
+            else:
+                s_train = 30.0
+
+        if failure_severity_score is not None:
+            s_sev = min(100.0, max(10.0, float(failure_severity_score)))
+        else:
+            if any(term in wt for term in ["FRACTURE", "DEFECT", "INTERLOCKING"]):
+                s_sev = 88.0
+            elif any(term in wt for term in ["TAMPING", "SURFACING", "POINT_OVERHAUL"]):
+                s_sev = 75.0
+            elif any(term in wt for term in ["INSPECTION", "CALIBRATION"]):
+                s_sev = 50.0
+            else:
+                s_sev = 25.0
+
+        s_mit = mitigation_score if mitigation_score is not None else 70.0
+
+        # Multi-factor formula:
+        # Safety = 40% Safety Consequence + 35% Train Operation Safety Impact + 25% Failure Severity
+        calculated_safety = round(0.40 * s_cons + 0.35 * s_train + 0.25 * s_sev, 1)
+
+        sub = {
+            "safety_consequence_score": s_cons,
+            "train_operation_safety_score": s_train,
+            "failure_severity_score": s_sev,
+            "mitigation_score": s_mit,
+            "safety_score": calculated_safety,
+            "calculation_version": "v2.0-deterministic"
+        }
+
+        if calculated_safety >= 70.0:
             label = "HIGH"
-        elif score >= 45.0:
+        elif calculated_safety >= 45.0:
             label = "MEDIUM"
         else:
             label = "LOW"
 
-        return score, label, reason
+        reason = f"{label} safety impact: Consequence {s_cons} (40%) + Train Risk {s_train} (35%) + Severity {s_sev} (25%)"
+        return calculated_safety, label, reason, sub
 
     @classmethod
     def calculate_urgency(
@@ -229,8 +304,8 @@ class PriorityEngine:
         weights = custom_weights or cls.DEFAULT_WEIGHTS
 
         # 1. Criticality & Safety Impact
-        c_score, c_label, c_reason = cls.calculate_criticality(work_type, department_code, user_priority, is_emergency)
-        s_score, s_label, s_reason = cls.calculate_safety_impact(work_type, department_code, is_emergency)
+        c_score, c_label, c_reason, c_sub = cls.calculate_criticality(work_type, department_code, user_priority, is_emergency)
+        s_score, s_label, s_reason, s_sub = cls.calculate_safety_impact(work_type, department_code, is_emergency)
         u_score, u_label, u_reason = cls.calculate_urgency(due_date, user_priority, is_emergency)
 
         # 2. Overdue Risk Score (0 - 100)
@@ -366,9 +441,11 @@ class PriorityEngine:
             "criticality": c_score,
             "criticality_label": c_label,
             "criticality_reason": c_reason,
+            "criticality_sub_factors": c_sub,
             "safety_impact": s_score,
             "safety_impact_label": s_label,
             "safety_impact_reason": s_reason,
+            "safety_sub_factors": s_sub,
             "urgency": u_score,
             "urgency_label": u_label,
             "urgency_reason": u_reason,

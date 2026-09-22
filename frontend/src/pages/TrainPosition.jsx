@@ -1,11 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Radio, MapPin, Gauge, Clock, ArrowRight, ShieldCheck, RefreshCw, AlertCircle, Layers } from 'lucide-react';
-import { getLiveTrainMovements, getStations, getSections, getCorridors, getTimeDistanceData, validateRoute, getDataStatus } from '../services/api';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Radio, MapPin, Gauge, Clock, ArrowRight, ShieldCheck, RefreshCw, AlertCircle, Layers, Search } from 'lucide-react';
+import { getLiveTrainMovements, getLiveCorridorData, getStations, getSections, getCorridors, getCorridorGeometry, getTimeDistanceData, validateRoute, getDataStatus } from '../services/api';
 import RailwayMap from '../maps/RailwayMap';
 import StationAutocomplete from '../components/StationAutocomplete';
 
 export default function TrainPosition() {
   const [corridors, setCorridors] = useState([]);
+  const [corridorSearch, setCorridorSearch] = useState('');
   const [selectedCorridorId, setSelectedCorridorId] = useState(null);
   const [selectedCorridorName, setSelectedCorridorName] = useState('');
   const [startCode, setStartCode] = useState('');
@@ -17,6 +18,13 @@ export default function TrainPosition() {
   const [endStationDisplay, setEndStationDisplay] = useState('');
 
   const [movements, setMovements] = useState([]);
+  const [corridorSummary, setCorridorSummary] = useState({
+    scheduledCount: 0,
+    liveCount: 0,
+    unavailableCount: 0,
+    status: 'UNAVAILABLE',
+    reason: ''
+  });
   const [stations, setStations] = useState([]);
   const [sections, setSections] = useState([]);
   const [routeData, setRouteData] = useState(null);
@@ -34,13 +42,39 @@ export default function TrainPosition() {
 
   const requestIdRef = useRef(0);
 
-  // Poll database-backed movements every 5 seconds (fast, zero provider calls)
+  const filteredCorridors = useMemo(() => {
+    const valid = corridors.filter(c => c.prototype_code && /^C(0[1-9]|[1-3][0-9]|4[0-6])$/.test(c.prototype_code));
+    if (!corridorSearch.trim()) return valid;
+    const q = corridorSearch.trim().toLowerCase();
+    return valid.filter(c =>
+      (c.name && c.name.toLowerCase().includes(q)) ||
+      (c.prototype_code && c.prototype_code.toLowerCase().includes(q)) ||
+      (c.start_station_code && c.start_station_code.toLowerCase().includes(q)) ||
+      (c.end_station_code && c.end_station_code.toLowerCase().includes(q))
+    );
+  }, [corridors, corridorSearch]);
+
+  // Poll movements & candidate discovery every 5 seconds
   useEffect(() => {
     const pollMovements = async () => {
       try {
-        const res = await getLiveTrainMovements(selectedCorridorId, false);
-        if (Array.isArray(res?.data) && res.data.length > 0) {
-          setMovements(res.data);
+        if (selectedCorridorId) {
+          const res = await getLiveCorridorData(selectedCorridorId, false);
+          if (res?.data && Array.isArray(res.data.trains)) {
+            setMovements(res.data.trains);
+            setCorridorSummary({
+              scheduledCount: res.data.scheduledTrainCount || res.data.trains.length,
+              liveCount: res.data.liveAvailableCount || 0,
+              unavailableCount: res.data.liveUnavailableCount || 0,
+              status: res.data.liveStatus || 'UNAVAILABLE',
+              reason: res.data.reason || ''
+            });
+          }
+        } else {
+          const res = await getLiveTrainMovements(null, false);
+          if (Array.isArray(res?.data) && res.data.length > 0) {
+            setMovements(res.data);
+          }
         }
       } catch (err) {
         console.warn('[ABPS] Movement polling notice:', err);
@@ -78,20 +112,32 @@ export default function TrainPosition() {
     setRefreshing(true);
     setRefreshMessage('Refreshing TN live trains...');
     try {
-      const res = await getLiveTrainMovements(selectedCorridorId, true);
-      const updated = Array.isArray(res?.data) ? res.data : [];
-      setMovements(updated);
+      if (selectedCorridorId) {
+        const res = await getLiveCorridorData(selectedCorridorId, true);
+        if (res?.data && Array.isArray(res.data.trains)) {
+          setMovements(res.data.trains);
+          setCorridorSummary({
+            scheduledCount: res.data.scheduledTrainCount || res.data.trains.length,
+            liveCount: res.data.liveAvailableCount || 0,
+            unavailableCount: res.data.liveUnavailableCount || 0,
+            status: res.data.liveStatus || 'UNAVAILABLE',
+            reason: res.data.reason || ''
+          });
+          if (res.data.liveAvailableCount > 0) {
+            setRefreshMessage(`Updated ${res.data.liveAvailableCount} live trains (${res.data.liveUnavailableCount} scheduled without live data)`);
+          } else {
+            setRefreshMessage(`Live telemetry unavailable (${res.data.reason || 'Remote'}); showing ${res.data.trains.length} scheduled candidates`);
+          }
+        }
+      } else {
+        const res = await getLiveTrainMovements(null, true);
+        const updated = Array.isArray(res?.data) ? res.data : [];
+        setMovements(updated);
+        setRefreshMessage(updated.length > 0 ? `Updated ${updated.length} live trains` : 'No fresh telemetry available (cooldown active)');
+      }
 
       const stRes = await getDataStatus();
       if (stRes?.data) setDataStatus(stRes.data);
-
-      if (stRes?.data?.status === 'ERROR') {
-        setRefreshMessage('Live provider rate limited; showing latest available telemetry');
-      } else if (updated.length > 0) {
-        setRefreshMessage(`Updated ${updated.length} live trains`);
-      } else {
-        setRefreshMessage('No fresh telemetry available (cooldown active)');
-      }
     } catch (err) {
       console.error('[ABPS] Refresh radar error:', err);
       setRefreshMessage('Live provider rate limited; showing latest available telemetry');
@@ -109,35 +155,113 @@ export default function TrainPosition() {
         setSelectedCorridorName('');
       }
       setMovements([]);
+      setCorridorSummary({
+        scheduledCount: 0,
+        liveCount: 0,
+        unavailableCount: 0,
+        status: 'UNAVAILABLE',
+        reason: ''
+      });
       return;
     }
 
     const reqId = parentReqId || ++requestIdRef.current;
+    if (!keepRoute) {
+      setRouteLoading(true);
+    }
     setLoading(true);
 
+    // Step 1: Immediately load authentic corridor geometry and station nodes (<20ms)
+    getCorridorGeometry(corrId).then((geomRes) => {
+      if (reqId !== requestIdRef.current) return;
+      if (geomRes && geomRes.data) {
+        const gData = geomRes.data;
+        if (Array.isArray(gData.leaflet_latlngs) && gData.leaflet_latlngs.length > 0) {
+          setRoutePolyline(gData.leaflet_latlngs);
+        }
+        const stnNodes = Array.isArray(gData.station_nodes) ? gData.station_nodes : [];
+        if (!keepRoute && stnNodes.length > 0) {
+          setStations(stnNodes);
+        }
+        if (!keepRoute && Array.isArray(gData.section_nodes) && gData.section_nodes.length > 0) {
+          setSections(gData.section_nodes);
+        }
+        const startC = gData.properties?.start_station_code || stnNodes[0]?.station_code || stnNodes[0]?.code || (Array.isArray(gData.stations) ? gData.stations[0] : '');
+        const endC = gData.properties?.end_station_code || stnNodes[stnNodes.length - 1]?.station_code || stnNodes[stnNodes.length - 1]?.code || (Array.isArray(gData.stations) ? gData.stations[gData.stations.length - 1] : '');
+        const startN = stnNodes[0]?.station_name || stnNodes[0]?.name || startC;
+        const endN = stnNodes[stnNodes.length - 1]?.station_name || stnNodes[stnNodes.length - 1]?.name || endC;
+
+        if (gData.properties?.name) {
+          setSelectedCorridorName(gData.properties.name);
+        }
+
+        setRouteData({
+          valid: true,
+          status: 'AUTHENTIC RAILWAY ROUTE',
+          corridor_id: gData.properties?.corridor_id,
+          prototype_code: gData.properties?.prototype_code,
+          name: gData.properties?.name || '',
+          start_station_code: startC,
+          end_station_code: endC,
+          start_station_name: startN,
+          end_station_name: endN,
+          from: { division: gData.properties?.division || 'SR' },
+          to: { division: gData.properties?.division || 'SR' },
+          distance_km: gData.properties?.total_distance_km || 0,
+          sections_count: gData.properties?.sections_count || (gData.sections?.length || 0),
+          intermediate_stations_count: Math.max(0, (stnNodes.length > 0 ? stnNodes.length : (gData.stations?.length || 0)) - 2),
+          geometry: gData.geometry
+        });
+
+        setStartStationDisplay(startC ? `${startC} — ${startN}` : '');
+        setEndStationDisplay(endC ? `${endC} — ${endN}` : '');
+        setRouteLoading(false);
+      }
+    }).catch((err) => {
+      console.warn('[ABPS] Geometry load error:', err);
+    });
+
+    // Step 2: Query candidate trains and live status directly from Live Corridor service
+    try {
+      const liveRes = await getLiveCorridorData(corrId, false);
+      if (reqId !== requestIdRef.current) return;
+      if (liveRes?.data && Array.isArray(liveRes.data.trains)) {
+        setMovements(liveRes.data.trains);
+        setCorridorSummary({
+          scheduledCount: liveRes.data.scheduledTrainCount || liveRes.data.trains.length,
+          liveCount: liveRes.data.liveAvailableCount || 0,
+          unavailableCount: liveRes.data.liveUnavailableCount || 0,
+          status: liveRes.data.liveStatus || 'UNAVAILABLE',
+          reason: liveRes.data.reason || ''
+        });
+      }
+    } catch (err) {
+      console.warn('[ABPS] Live corridor telemetry fetch notice:', err);
+    }
+
+    // Step 3: Concurrently fetch time-distance data for sections and timeline
     try {
       const tdRes = await getTimeDistanceData(corrId);
       if (reqId !== requestIdRef.current) return;
 
       if (tdRes && tdRes.data) {
         const data = tdRes.data;
-        // Safely validate stations if not keeping existing route
-        if (!keepRoute && Array.isArray(data.stations)) {
+        if (!keepRoute && Array.isArray(data.stations) && data.stations.length > 0) {
           const validStns = data.stations.filter(
             s => s && s.latitude !== undefined && s.longitude !== undefined &&
               !isNaN(Number(s.latitude)) && !isNaN(Number(s.longitude))
-          );
-          setStations(validStns);
+          ).map((s, idx) => ({
+            ...s,
+            code: s.station_code || s.code || `STN_${idx}`,
+            name: s.station_name || s.name || s.station_code || s.code || `Station ${idx + 1}`
+          }));
+          if (validStns.length > 0) {
+            setStations(validStns);
+          }
         }
 
-        if (!keepRoute && Array.isArray(data.sections)) {
+        if (!keepRoute && Array.isArray(data.sections) && data.sections.length > 0) {
           setSections(data.sections);
-        }
-
-        if (Array.isArray(data.trains)) {
-          setMovements(data.trains);
-        } else {
-          setMovements([]);
         }
 
         if (data.corridor?.name) {
@@ -157,10 +281,10 @@ export default function TrainPosition() {
     } catch (err) {
       if (reqId !== requestIdRef.current) return;
       console.warn('[ABPS] Train telemetry fetch warning (map remains intact):', err);
-      setMovements([]);
     } finally {
       if (reqId === requestIdRef.current) {
         setLoading(false);
+        setRouteLoading(false);
       }
     }
   };
@@ -173,9 +297,14 @@ export default function TrainPosition() {
     setRouteMsg('');
     setRouteError(null);
     setNoRouteFound(false);
-    setRouteData(null);
-    setRoutePolyline([]);
     loadCorridorTelemetry(parsedId);
+  };
+
+  const selectPresetCorridor = (protoCode) => {
+    const found = corridors.find(c => c.prototype_code === protoCode);
+    if (found) {
+      handleCorridorChange(found.id);
+    }
   };
 
   const handleCustomRouteSearch = async (e, overrideStart, overrideEnd) => {
@@ -349,7 +478,24 @@ export default function TrainPosition() {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {selectedCorridorId && (
+            <>
+              <span className="bg-blue-950 text-blue-200 border border-blue-500 px-2.5 py-1 text-xs font-mono font-bold flex items-center gap-1.5 shadow-sm rounded">
+                <Layers className="w-3.5 h-3.5 text-blue-400" />
+                TODAY'S SCHEDULED TRAINS: {corridorSummary.scheduledCount || movements.length}
+              </span>
+              <span className="bg-emerald-950 text-emerald-300 border border-emerald-500 px-2.5 py-1 text-xs font-mono font-bold flex items-center gap-1.5 shadow-sm rounded">
+                <Radio className="w-3.5 h-3.5 text-emerald-400" />
+                LIVE AVAILABLE: {corridorSummary.liveCount}
+              </span>
+              <span className="bg-amber-950 text-amber-300 border border-amber-500 px-2.5 py-1 text-xs font-mono font-bold flex items-center gap-1.5 shadow-sm rounded">
+                <Clock className="w-3.5 h-3.5 text-amber-400" />
+                LIVE UNAVAILABLE: {corridorSummary.unavailableCount || Math.max(0, (corridorSummary.scheduledCount || movements.length) - corridorSummary.liveCount)}
+              </span>
+            </>
+          )}
+
           {dataStatus.status === 'LIVE RADAR' || dataStatus.status === 'LIVE' ? (
             <span className="bg-emerald-900 text-emerald-300 border border-emerald-500 px-2.5 py-1 text-xs font-mono font-bold flex items-center gap-1.5 shadow-sm rounded">
               <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
@@ -389,13 +535,12 @@ export default function TrainPosition() {
       </div>
 
       {refreshMessage && (
-        <div className={`text-xs px-3 py-1.5 rounded font-mono font-semibold border flex items-center justify-between ${
-          refreshMessage.includes('rate limited') || refreshMessage.includes('error')
+        <div className={`text-xs px-3 py-1.5 rounded font-mono font-semibold border flex items-center justify-between ${refreshMessage.includes('rate limited') || refreshMessage.includes('error')
             ? 'bg-amber-50 border-amber-300 text-amber-900'
             : refreshMessage.includes('Updated')
-            ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
-            : 'bg-blue-50 border-blue-300 text-blue-900'
-        }`}>
+              ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+              : 'bg-blue-50 border-blue-300 text-blue-900'
+          }`}>
           <span>📡 {refreshMessage}</span>
           <button onClick={() => setRefreshMessage('')} className="text-slate-400 hover:text-slate-600 font-bold ml-2">✕</button>
         </div>
@@ -407,15 +552,25 @@ export default function TrainPosition() {
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center space-x-1.5">
               <span className="font-bold text-slate-700 uppercase text-[11px]">Corridor:</span>
+              <div className="relative flex items-center">
+                <Search className="w-3 h-3 text-slate-400 absolute left-2 pointer-events-none" />
+                <input
+                  type="text"
+                  placeholder="Filter (e.g. Salem, MDU, C40)..."
+                  value={corridorSearch}
+                  onChange={(e) => setCorridorSearch(e.target.value)}
+                  className="font-mono text-[11px] bg-white border border-slate-300 pl-6 pr-2 py-1 w-44 rounded focus:outline-none focus:border-[#0B2545]"
+                />
+              </div>
               <select
                 value={selectedCorridorId || ''}
                 onChange={(e) => handleCorridorChange(e.target.value)}
-                className="font-bold text-slate-900 bg-white border border-slate-300 px-2.5 py-1 text-xs cursor-pointer rounded"
+                className="font-bold text-slate-900 bg-white border border-slate-300 px-2.5 py-1 text-xs cursor-pointer rounded max-w-xs md:max-w-md truncate"
               >
-                <option value="">[ -- SELECT OPERATIONAL CORRIDOR (C01–C20) -- ]</option>
-                {corridors.map((c) => (
+                <option value="">[ -- SELECT OPERATIONAL CORRIDOR (C01–C46) -- ]</option>
+                {filteredCorridors.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.prototype_code ? `[${c.prototype_code}] ` : ''}{c.name} | {c.start_station_code} ↔ {c.end_station_code} ({c.total_distance_km ? `${c.total_distance_km} km` : `${c.sections_count || 3} sec`})
+                    [{c.prototype_code}] {c.name}
                   </option>
                 ))}
               </select>
@@ -459,43 +614,64 @@ export default function TrainPosition() {
           )}
         </div>
 
-        {/* Quick Route Presets */}
+        {/* Quick Authoritative Corridor Presets */}
         <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-200 text-[10px]">
-          <span className="text-slate-500 font-semibold uppercase">TN Corridors / Pairs:</span>
+          <span className="text-slate-500 font-semibold uppercase">Authoritative TN Corridors:</span>
           <button
             type="button"
-            onClick={() => selectPresetRoute('CVP', 'TEN')}
-            className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded font-semibold transition-colors"
+            onClick={() => selectPresetCorridor('C40')}
+            className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-300 rounded font-semibold transition-colors"
           >
-            ⭐ CVP → TEN (Kovilpatti - Tirunelveli)
+            ⭐ C40: Madurai → Tirunelveli (MDU–TEN)
           </button>
           <button
             type="button"
-            onClick={() => selectPresetRoute('MAS', 'TPJ')}
+            onClick={() => selectPresetCorridor('C15')}
             className="px-2 py-0.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded font-semibold transition-colors"
           >
-            MAS → TPJ (Chennai - Trichy)
+            C15: Salem → Jolarpettai (SA–JTJ)
           </button>
           <button
             type="button"
-            onClick={() => selectPresetRoute('TPJ', 'MDU')}
+            onClick={() => selectPresetCorridor('C31')}
             className="px-2 py-0.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded font-semibold transition-colors"
           >
-            TPJ → MDU (Trichy - Madurai)
+            C31: Thanjavur → Karaikal (TJ–KIK)
           </button>
           <button
             type="button"
-            onClick={() => selectPresetRoute('MDU', 'TEN')}
+            onClick={() => selectPresetCorridor('C37')}
             className="px-2 py-0.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded font-semibold transition-colors"
           >
-            MDU → TEN (Madurai - Tirunelveli)
+            C37: Trichy → Manamadurai (TPJ–MNM)
           </button>
           <button
             type="button"
-            onClick={() => selectPresetRoute('CBE', 'SA')}
+            onClick={() => selectPresetCorridor('C45')}
             className="px-2 py-0.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded font-semibold transition-colors"
           >
-            CBE → SA (Coimbatore - Salem)
+            C45: Madurai → Bodinayakkanur (MDU–BDNK)
+          </button>
+          <button
+            type="button"
+            onClick={() => selectPresetCorridor('C23')}
+            className="px-2 py-0.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded font-semibold transition-colors"
+          >
+            C23: Nilgiri Mountain Railway (MTP–UAM)
+          </button>
+          <button
+            type="button"
+            onClick={() => selectPresetCorridor('C21')}
+            className="px-2 py-0.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded font-semibold transition-colors"
+          >
+            C21: Erode → Coimbatore (ED–CBE)
+          </button>
+          <button
+            type="button"
+            onClick={() => selectPresetCorridor('C01')}
+            className="px-2 py-0.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded font-semibold transition-colors"
+          >
+            C01: Chennai → Arakkonam (MAS–AJJ)
           </button>
         </div>
       </div>
@@ -632,12 +808,14 @@ export default function TrainPosition() {
                         <div className="text-slate-300 font-mono text-xs flex-shrink-0">→</div>
                       )}
                       <div className={`px-2 py-1 rounded flex-shrink-0 border flex flex-col items-center ${isFirst ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-bold' :
-                          isLast ? 'bg-red-50 border-red-300 text-red-900 font-bold' :
-                            'bg-white border-slate-200 text-slate-800'
+                        isLast ? 'bg-red-50 border-red-300 text-red-900 font-bold' :
+                          'bg-white border-slate-200 text-slate-800'
                         }`}>
                         <div className="flex items-center gap-1">
-                          <span className="font-mono">{stn.code}</span>
-                          <span className="text-[9px] text-slate-500 font-normal">({stn.name})</span>
+                          <span className="font-mono">{stn.code || stn.station_code}</span>
+                          {(stn.name || stn.station_name) && (
+                            <span className="text-[9px] text-slate-500 font-normal">({stn.name || stn.station_name})</span>
+                          )}
                         </div>
                         {stn.distance_km !== undefined && (
                           <span className="text-[9px] font-mono text-slate-400">{stn.distance_km} km</span>
@@ -673,7 +851,9 @@ export default function TrainPosition() {
         <div className="cris-panel-header flex items-center justify-between">
           <span>LIVE TRAIN MOVEMENT TELEMETRY & SECTION MAPPING CONFIDENCE</span>
           <span className="text-[10px] text-slate-500 font-mono">
-            {movements.length > 0 ? `${movements.length} Active Express / Freight Rakes` : '0 Active Trains'}
+            {movements.length > 0
+              ? `${movements.length} Candidate Trains (${corridorSummary.liveCount} Live Telemetry)`
+              : '0 Candidate Trains'}
           </span>
         </div>
 
@@ -683,7 +863,9 @@ export default function TrainPosition() {
               <tr>
                 <th>TRAIN</th>
                 <th>NAME</th>
-                <th>STATUS</th>
+                <th>TYPE</th>
+                <th>SCHEDULED</th>
+                <th>LIVE STATUS</th>
                 <th>LOCATION / SECTION</th>
                 <th>SPEED</th>
                 <th>DELAY</th>
@@ -695,83 +877,140 @@ export default function TrainPosition() {
             <tbody>
               {loading && movements.length === 0 ? (
                 <tr>
-                  <td colSpan="9" className="text-center py-8 text-slate-500 italic">
-                    Fetching live telemetry from RailRadar...
+                  <td colSpan="11" className="text-center py-8 text-slate-500 italic">
+                    Fetching live telemetry and candidate timetable...
                   </td>
                 </tr>
               ) : !selectedCorridorId && !startCode ? (
                 <tr>
-                  <td colSpan="9" className="text-center py-12 text-slate-500">
+                  <td colSpan="11" className="text-center py-12 text-slate-500">
                     <div className="flex flex-col items-center justify-center space-y-1">
                       <Layers className="w-8 h-8 text-slate-400 mb-1" />
                       <div className="font-bold text-slate-700 text-sm">NO CORRIDOR SELECTED</div>
                       <div className="text-xs text-slate-400 max-w-md text-center">
-                        Please select a railway corridor or enter start & end station codes above to track live trains.
+                        Please select a railway corridor or enter start & end station codes above to track candidate and live trains.
                       </div>
                     </div>
                   </td>
                 </tr>
               ) : movements.length === 0 ? (
                 <tr>
-                  <td colSpan="9" className="text-center py-12 text-slate-500">
+                  <td colSpan="11" className="text-center py-12 text-slate-500">
                     <div className="flex flex-col items-center justify-center space-y-1">
                       <AlertCircle className="w-8 h-8 text-slate-400 mb-1" />
-                      <div className="font-bold text-slate-700 text-sm">No live train data available</div>
+                      <div className="font-bold text-slate-700 text-sm">No candidate trains scheduled today</div>
                       <div className="text-xs text-slate-400 max-w-md text-center">
-                        Waiting for live train updates.
+                        No trains are scheduled to traverse the selected corridor sections on this journey date.
                       </div>
                     </div>
                   </td>
                 </tr>
               ) : (
-                movements.map((m) => (
-                  <tr key={m.train_number} className="hover:bg-slate-50 transition-colors">
-                    <td className="font-mono font-bold text-slate-900">{m.train_number}</td>
-                    <td className="font-bold text-slate-800">{m.train_name}</td>
-                    <td>
-                      <span className="bg-blue-100 text-blue-800 px-1.5 py-0.5 text-[10px] font-mono font-bold border border-blue-300">
-                        {m.train_type || 'EXPRESS'}
-                      </span>
-                    </td>
-                    <td>
-                      <strong className="text-[#134074]">{m.section_code || (m.current_section_id ? `SEC_${m.current_section_id}` : 'EN ROUTE')}</strong>
-                      <div className="font-mono text-[10px] text-slate-600">
-                        {m.latitude ? `${Number(m.latitude).toFixed(3)}, ${Number(m.longitude).toFixed(3)}` : 'GPS Acquired'}
-                      </div>
-                      {(m.previous_halt || m.next_halt) && (
-                        <div className="text-[9px] text-slate-500 font-mono">
-                          {m.previous_halt || 'ORIGIN'} → {m.next_halt || 'TERM'}
-                        </div>
-                      )}
-                    </td>
-                    <td className="font-mono font-bold text-slate-900">{m.speed_kmh} km/h</td>
-                    <td>
-                      <span className={`px-1.5 py-0.5 text-[10px] font-mono font-bold ${m.delay_minutes > 0 ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'
+                movements.map((m) => {
+                  const conf = m.mapping_confidence_pct || (typeof m.mapping_confidence === 'number' ? Math.round(m.mapping_confidence > 1 ? m.mapping_confidence : m.mapping_confidence * 100) : 95);
+                  const barColor = conf >= 90 ? 'bg-emerald-600' : conf >= 75 ? 'bg-blue-600' : 'bg-amber-500';
+
+                  return (
+                    <tr key={m.train_number} className="hover:bg-slate-50 transition-colors">
+                      <td className="font-mono font-bold text-slate-900 whitespace-nowrap">
+                        <span className="text-blue-900">{m.train_number}</span>
+                        {m.direction && (
+                          <span className={`ml-1.5 px-1 py-0.2 text-[9px] font-mono font-bold rounded ${m.direction === 'DOWN' ? 'bg-indigo-100 text-indigo-800' : 'bg-purple-100 text-purple-800'}`}>
+                            {m.direction}
+                          </span>
+                        )}
+                      </td>
+                      <td className="font-bold text-slate-800">
+                        <div>{m.train_name}</div>
+                        {(m.source_code || m.destination_code) && (
+                          <div className="text-[10px] text-slate-500 font-mono font-normal">
+                            {m.source_code || '—'} → {m.destination_code || '—'}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <span className={`px-1.5 py-0.5 text-[10px] font-mono font-bold rounded border ${
+                          m.train_type === 'VANDE_BHARAT' ? 'bg-sky-100 text-sky-800 border-sky-300' :
+                          m.train_type === 'SUPERFAST' ? 'bg-blue-100 text-blue-800 border-blue-300' :
+                          m.train_type === 'PASSENGER' || m.train_type === 'MEMU' ? 'bg-emerald-100 text-emerald-800 border-emerald-300' :
+                          'bg-slate-100 text-slate-800 border-slate-300'
                         }`}>
-                        {m.delay_minutes > 0 ? `+${m.delay_minutes} min` : 'RIGHT TIME'}
-                      </span>
-                    </td>
-                    <td>
-                      <div className="flex items-center space-x-1.5">
-                        <span className="font-mono font-bold text-emerald-700">
-                          {Math.round((m.mapping_confidence || 0.95) * 100)}%
+                          {m.train_type || 'EXPRESS'}
                         </span>
-                        <div className="w-12 h-1.5 bg-slate-200">
-                          <div
-                            className="h-full bg-emerald-600"
-                            style={{ width: `${(m.mapping_confidence || 0.95) * 100}%` }}
-                          />
+                      </td>
+                      <td>
+                        <div className="font-semibold text-slate-700 text-[11px]">{m.scheduled || 'Scheduled Today'}</div>
+                        {m.scheduled_entry && m.scheduled_entry !== '—' && (
+                          <div className="text-[10px] text-slate-500 font-mono">
+                            {m.scheduled_entry} → {m.scheduled_exit}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        {m.is_live ? (
+                          <span className="bg-emerald-100 text-emerald-800 border border-emerald-400 px-1.5 py-0.5 text-[10px] font-mono font-bold rounded flex items-center gap-1 w-fit">
+                            <Radio className="w-2.5 h-2.5 text-emerald-600 animate-pulse" />
+                            {m.live_status || m.status || 'RUNNING'}
+                          </span>
+                        ) : m.is_stale ? (
+                          <span className="bg-amber-100 text-amber-800 border border-amber-400 px-1.5 py-0.5 text-[10px] font-mono font-bold rounded flex items-center gap-1 w-fit">
+                            <Clock className="w-2.5 h-2.5 text-amber-600" />
+                            STALE ({m.age_minutes ? `${m.age_minutes}m` : 'OLD'})
+                          </span>
+                        ) : (
+                          <span className="bg-slate-100 text-slate-600 border border-slate-300 px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded w-fit inline-block">
+                            SCHEDULED — LIVE UNAVAILABLE
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        <div className="font-bold text-[#134074]">{m.current_location || m.section_code || 'Section En Route'}</div>
+                        {m.latitude && m.longitude && m.is_live ? (
+                          <div className="font-mono text-[10px] text-emerald-700">
+                            GPS: {Number(m.latitude).toFixed(3)}, {Number(m.longitude).toFixed(3)}
+                          </div>
+                        ) : (
+                          <div className="font-mono text-[10px] text-slate-400 italic">No GPS Lock</div>
+                        )}
+                      </td>
+                      <td className="font-mono font-bold">
+                        {m.is_live && m.speed_kmh !== null && m.speed_kmh !== undefined ? (
+                          <span className="text-slate-900">{m.speed_kmh} km/h</span>
+                        ) : (
+                          <span className="text-slate-400 font-bold">—</span>
+                        )}
+                      </td>
+                      <td>
+                        {m.is_live && m.delay_minutes !== null && m.delay_minutes !== undefined ? (
+                          <span className={`px-1.5 py-0.5 text-[10px] font-mono font-bold rounded ${m.delay_minutes > 0 ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'}`}>
+                            {m.delay_minutes > 0 ? `+${m.delay_minutes} min` : 'RIGHT TIME'}
+                          </span>
+                        ) : (
+                          <span className="font-mono text-slate-400 font-bold">—</span>
+                        )}
+                      </td>
+                      <td>
+                        <div className="space-y-0.5" title={m.mapping_reason || ''}>
+                          <div className="flex items-center space-x-1.5">
+                            <span className="font-mono font-bold text-slate-800 text-[11px]">{conf}%</span>
+                            <div className="w-12 h-1.5 bg-slate-200 rounded-xs overflow-hidden">
+                              <div className={`h-full ${barColor}`} style={{ width: `${conf}%` }} />
+                            </div>
+                          </div>
+                          <div className="text-[9px] text-slate-500 font-mono truncate max-w-[130px]">
+                            {m.mapping_method || (conf >= 90 ? 'EXACT_ROUTE_SECTION_MATCH' : 'PARTIAL_ROUTE_MATCH')}
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                    <td className="font-mono text-[10px] font-bold text-slate-700">
-                      {m.source}
-                    </td>
-                    <td className="font-mono text-[10px] text-slate-500">
-                      {m.last_updated ? new Date(m.last_updated).toLocaleTimeString() : 'Recent'}
-                    </td>
-                  </tr>
-                ))
+                      </td>
+                      <td className="font-mono text-[10px] font-bold text-slate-700">
+                        {m.source || 'Timetable Master'}
+                      </td>
+                      <td className="font-mono text-[10px] text-slate-500">
+                        {m.last_updated && m.last_updated !== '—' ? m.last_updated : '—'}
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

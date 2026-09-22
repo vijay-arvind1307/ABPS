@@ -118,8 +118,8 @@ export default function WhatIf() {
                     type="button"
                     onClick={() => setDurationMultiplier(item.val)}
                     className={`py-1 text-[11px] font-bold border ${durationMultiplier === item.val
-                        ? 'bg-[#134074] text-white border-[#0B2545]'
-                        : 'bg-slate-100 text-slate-800 border-slate-300 hover:bg-slate-200'
+                      ? 'bg-[#134074] text-white border-[#0B2545]'
+                      : 'bg-slate-100 text-slate-800 border-slate-300 hover:bg-slate-200'
                       }`}
                   >
                     {item.label}
@@ -167,8 +167,8 @@ export default function WhatIf() {
                     type="button"
                     onClick={() => setTrainDelayMin(item.val)}
                     className={`py-1 text-[11px] font-bold border ${trainDelayMin === item.val
-                        ? 'bg-red-600 text-white border-red-800'
-                        : 'bg-slate-100 text-slate-800 border-slate-300 hover:bg-slate-200'
+                      ? 'bg-red-600 text-white border-red-800'
+                      : 'bg-slate-100 text-slate-800 border-slate-300 hover:bg-slate-200'
                       }`}
                   >
                     {item.label}

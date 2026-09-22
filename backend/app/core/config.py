@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     RAILRADAR_CACHE_TTL_ROUTE: int = 1800
     RAILRADAR_CACHE_TTL_STATION: int = 180
 
+    RAILRADAR_TIMEOUT_SECONDS: int = 10
+    RAILRADAR_CACHE_SECONDS: int = 30
+    RAILRADAR_MIN_REQUEST_INTERVAL_SECONDS: int = 30
+
     # Controlled Live Telemetry & TN Scoping
     LIVE_POLL_INTERVAL_SECONDS: int = 45
     LIVE_REQUEST_COOLDOWN_SECONDS: int = 30
@@ -52,8 +56,7 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-        "*",
+        "http://127.0.0.1:3000"
     ]
 
     model_config = SettingsConfigDict(

@@ -76,7 +76,7 @@ export const searchStations = (q) => api.get('/railway/stations/search', { param
 export const validateRoute = (start, end) => api.get('/railway/routes/validate', { params: { start, end } });
 export const getRailwayRoute = (start, end) => api.get('/railway/route', { params: { from: start, to: end } });
 export const getSections = (corridorId) => api.get('/railway/sections', { params: { corridor_id: corridorId } });
-export const getCorridors = (params) => api.get('/railway/corridors', { params });
+export const getCorridors = (params) => api.get('/railway/corridors', { params: { canonical_only: true, ...params } });
 export const getCorridorById = (id) => api.get(`/railway/corridors/${id}`);
 export const getCorridorStations = (id) => api.get(`/railway/corridors/${id}/stations`);
 export const getCorridorSections = (id) => api.get(`/railway/corridors/${id}/sections`);
@@ -139,9 +139,25 @@ export const markAllNotificationsRead = () => api.post('/notifications/read-all'
 // Dynamic Replanning & Disturbance Endpoints
 export const simulateTrainDelay = (data) => api.post('/dynamic/simulate-delay', data);
 export const dynamicReplan = (data) => api.post('/dynamic/replan', data);
+export const runDynamicReplanning = (data) => api.post('/replanning/run', data);
 
 // What-If Simulation
 export const simulateWhatIf = (data) => api.post('/whatif/simulate', data);
+export const createWhatIfScenario = (data) => api.post('/what-if', data);
+export const getWhatIfScenario = (id) => api.get(`/what-if/${id}`);
+
+// Live Telemetry & Health Endpoints (Section 45)
+export const getLiveHealth = () => api.get('/live/health');
+export const getLiveCorridorData = (corridorId, refresh = false) => api.get(`/live/corridors/${corridorId}`, { params: refresh ? { refresh: true } : {} });
+export const getLiveTrainTelemetry = (trainNumber) => api.get(`/live/trains/${trainNumber}`);
+
+// Availability Engine Endpoints (Section 45)
+export const getAvailability = (params) => api.get('/availability', { params });
+export const checkAvailabilityFeasibility = (data) => api.post('/availability/check', data);
+
+// Global CP-SAT Optimization Endpoints (Section 45)
+export const runStandardOptimization = (data) => api.post('/optimization/run', data);
+export const getStandardOptimizationPlans = (params) => api.get('/optimization/plans', { params });
 
 // Railway Station Master Endpoints (Primary Source: documents/TN-station list.pdf)
 export const getStationMaster = (code) => api.get(`/stations/${code}`);

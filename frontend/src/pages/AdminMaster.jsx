@@ -95,22 +95,20 @@ export default function AdminMaster() {
       <div className="flex border-b border-slate-300 bg-slate-100 px-2 pt-2 gap-2 text-xs">
         <button
           onClick={() => setActiveTab('stations_master')}
-          className={`px-4 py-2 font-bold uppercase transition-colors border-b-2 flex items-center gap-1.5 ${
-            activeTab === 'stations_master'
+          className={`px-4 py-2 font-bold uppercase transition-colors border-b-2 flex items-center gap-1.5 ${activeTab === 'stations_master'
               ? 'border-[#134074] text-[#134074] bg-white shadow-xs'
               : 'border-transparent text-slate-600 hover:text-slate-900'
-          }`}
+            }`}
         >
           <Train className="w-4 h-4 text-blue-700" />
           Railway Station Master (PDF Master: 726 Stations)
         </button>
         <button
           onClick={() => setActiveTab('corridor_sections')}
-          className={`px-4 py-2 font-bold uppercase transition-colors border-b-2 flex items-center gap-1.5 ${
-            activeTab === 'corridor_sections'
+          className={`px-4 py-2 font-bold uppercase transition-colors border-b-2 flex items-center gap-1.5 ${activeTab === 'corridor_sections'
               ? 'border-[#134074] text-[#134074] bg-white shadow-xs'
               : 'border-transparent text-slate-600 hover:text-slate-900'
-          }`}
+            }`}
         >
           <Sliders className="w-4 h-4 text-slate-600" />
           Corridor Sections & Safety Parameters
@@ -305,13 +303,12 @@ export default function AdminMaster() {
                           </span>
                         </td>
                         <td>
-                          <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${
-                            s.station_type === 'HALT'
+                          <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${s.station_type === 'HALT'
                               ? 'bg-amber-100 text-amber-800 border border-amber-300'
                               : s.station_type === 'FLAG'
-                              ? 'bg-blue-100 text-blue-800 border border-blue-300'
-                              : 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                          }`}>
+                                ? 'bg-blue-100 text-blue-800 border border-blue-300'
+                                : 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                            }`}>
                             {s.station_type || 'REGULAR'}
                           </span>
                         </td>

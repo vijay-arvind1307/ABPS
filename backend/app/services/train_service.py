@@ -1,6 +1,7 @@
 import time
-from typing import List, Dict, Any, Optional
-from datetime import datetime
+import re
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from app.models.models import (
@@ -90,8 +91,16 @@ class TrainService:
         meta = base_meta or {}
         name = str(meta.get("train_name") or meta.get("name") or route_data.get("train_name") or f"Express {num_str}")
         t_type = str(meta.get("train_type") or meta.get("type") or "SUPERFAST").upper()
-        src_code = str(meta.get("source_code") or meta.get("source") or (stops[0].get("code") if stops else "") or "").upper()
-        dst_code = str(meta.get("destination_code") or meta.get("destination") or (stops[-1].get("code") if stops else "") or "").upper()
+        # Resolve genuine origin and destination station codes (avoid provider names like RAILRADAR)
+        raw_src = str(meta.get("source_code") or meta.get("source_station_code") or meta.get("from_station") or "").upper().strip()
+        if not raw_src or raw_src in ("RAILRADAR", "MOCK", "INTERNAL", "DATAMEET") or len(raw_src) > 5:
+            raw_src = (stops[0].get("code") if stops else "") or ""
+        src_code = raw_src.strip().upper()
+
+        raw_dst = str(meta.get("destination_code") or meta.get("destination_station_code") or meta.get("to_station") or "").upper().strip()
+        if not raw_dst or raw_dst in ("RAILRADAR", "MOCK", "INTERNAL", "DATAMEET") or len(raw_dst) > 5:
+            raw_dst = (stops[-1].get("code") if stops else "") or ""
+        dst_code = raw_dst.strip().upper()
         src_name = str(meta.get("source_name") or "")
         dst_name = str(meta.get("destination_name") or "")
         run_days = meta.get("run_days")
@@ -224,73 +233,415 @@ class TrainService:
         return train_rec
 
     @staticmethod
-    def get_trains_for_corridor(db: Session, corridor_id: int) -> List[Train]:
+    def get_corridor_sections_and_stations(db: Session, corridor_id: Any) -> Tuple[Optional[Corridor], List[RailwaySection], List[str]]:
         """
-        Phase 8 & 9: Discover and return all trains whose route intersects the selected corridor.
-        Uses authoritative corridor railway sections and stations.
-        If corridor trains are not yet cached, dynamically discovers them via RailRadar station train boards.
+        Resolves corridor, child railway sections, and full station union.
+        Handles both integer ID and string prototype_code (e.g. 'C40', 'CORR_C40_MDU_TEN').
+        For C40, guarantees resolution of all contiguous block sections between MDU and TEN.
         """
-        corr = db.query(Corridor).filter(Corridor.id == corridor_id).first()
+        corr = None
+        s_ident = str(corridor_id).strip()
+        if s_ident.isdigit():
+            corr = db.query(Corridor).filter(Corridor.id == int(s_ident)).first()
         if not corr:
-            return db.query(Train).filter(Train.active == True).all()
+            norm_id = s_ident.upper()
+            corr = db.query(Corridor).filter(
+                or_(
+                    Corridor.corridor_id == norm_id,
+                    Corridor.prototype_code == norm_id,
+                    Corridor.corridor_id == f"CORR_{norm_id}_MDU_TEN"
+                )
+            ).first()
 
-        sections = db.query(RailwaySection).filter(RailwaySection.corridor_id == corridor_id).all()
+        if not corr:
+            return None, [], []
+
+        sections = db.query(RailwaySection).filter(RailwaySection.corridor_id == corr.id).order_by(RailwaySection.id).all()
+        c40_section_names = {
+            "SEC_MDU_TDN", "SEC_TDN_TMQ", "SEC_TMQ_VPT", "SEC_VPT_SRT",
+            "SEC_SRT_CVP", "SEC_CVP_KDU", "SEC_KDU_MEJ", "SEC_MEJ_TEN"
+        }
+        if corr.prototype_code == "C40" or "MDU_TEN" in (corr.corridor_id or ""):
+            extra_secs = db.query(RailwaySection).filter(RailwaySection.section_id.in_(list(c40_section_names))).all()
+            sec_dict = {s.id: s for s in sections + extra_secs}
+            sections = list(sec_dict.values())
+
         corridor_stn_codes = set()
         if corr.start_station_code:
-            corridor_stn_codes.add(corr.start_station_code.upper().strip())
+            corridor_stn_codes.add(corr.start_station_code.strip().upper())
         if corr.end_station_code:
-            corridor_stn_codes.add(corr.end_station_code.upper().strip())
+            corridor_stn_codes.add(corr.end_station_code.strip().upper())
 
         for s in sections:
             if s.from_station and s.from_station.code:
-                corridor_stn_codes.add(s.from_station.code.upper().strip())
+                corridor_stn_codes.add(s.from_station.code.strip().upper())
             if s.to_station and s.to_station.code:
-                corridor_stn_codes.add(s.to_station.code.upper().strip())
+                corridor_stn_codes.add(s.to_station.code.strip().upper())
 
-        stn_list = list(corridor_stn_codes)
+        if corr.prototype_code == "C40" or "MDU_TEN" in (corr.corridor_id or ""):
+            corridor_stn_codes.update({'MDU', 'TDN', 'TMQ', 'VPT', 'SRT', 'CVP', 'KDU', 'MEJ', 'TEN'})
 
-        # 1. Query existing DB trains whose route stops intersect this corridor
-        matching = (
+        return corr, sections, sorted(list(corridor_stn_codes))
+
+    @staticmethod
+    def get_trains_for_corridor(db: Session, corridor_id: Any) -> List[Train]:
+        """
+        Discovers and returns ALL trains whose route traverses ANY section/station of the selected corridor.
+        Includes all train types (Superfast, Express, Mail/Express, Passenger, MEMU, EMU, DEMU, Special,
+        Intercity, Jan Shatabdi, Vande Bharat, Freight if present).
+        Supports bidirectional (UP and DOWN) and partial route intersections.
+        Never artificially limits the result set.
+        """
+        corr, sections, stn_list = TrainService.get_corridor_sections_and_stations(db, corridor_id)
+        if not corr:
+            return db.query(Train).filter(Train.active == True).all()
+
+        # 1. Query trains with route stops at corridor stations
+        matching_stops = (
             db.query(Train)
             .join(TrainRouteStop, Train.train_number == TrainRouteStop.train_number)
             .filter(TrainRouteStop.station_code.in_(stn_list), Train.active == True)
-            .distinct()
             .all()
         )
 
-        # 2. If fewer than 2 trains found and live mode is active, dynamically discover via RailRadar
+        # 2. Query trains mapped directly to corridor sections
+        sec_ids = [s.id for s in sections]
+        matching_secs = []
+        if sec_ids:
+            matching_secs = (
+                db.query(Train)
+                .join(TrainRoute, Train.train_number == TrainRoute.train_number)
+                .filter(TrainRoute.section_id.in_(sec_ids), Train.active == True)
+                .all()
+            )
+
+        # Union and deduplicate
+        train_map = {}
+        for t in matching_stops + matching_secs:
+            if t.train_number not in train_map:
+                train_map[t.train_number] = t
+
+        matching = list(train_map.values())
+
+        # If fewer than 2 trains discovered and live mode is active, attempt controlled discovery
         if len(matching) < 2 and settings.TRAIN_DATA_MODE.lower() == "live" and settings.RAILRADAR_API_KEY:
             provider = get_train_provider()
             query_stns = [corr.start_station_code, corr.end_station_code] if corr.start_station_code and corr.end_station_code else stn_list[:3]
-            
             for stn in query_stns:
                 if not stn:
                     continue
                 try:
                     station_trains = provider.get_station_trains(stn, include_intermediate=True)
-                    # Ingest discovered trains (sample up to 15 per station to respect rate limits)
                     for item in station_trains[:15]:
                         num = item.get("train_number")
                         if num:
                             try:
                                 TrainService.ingest_train_route(db, num, item)
-                            except Exception as ex:
+                            except Exception:
                                 db.rollback()
-                                print(f"[INGEST_WARN] Failed to ingest route for {num}: {ex}")
-                except Exception as e:
+                except Exception:
                     db.rollback()
-                    print(f"[CORRIDOR_DISCOVERY] Station train fetch failed for {stn}: {e}")
 
             # Re-query matching trains after discovery
-            matching = (
+            matching_stops = (
                 db.query(Train)
                 .join(TrainRouteStop, Train.train_number == TrainRouteStop.train_number)
                 .filter(TrainRouteStop.station_code.in_(stn_list), Train.active == True)
-                .distinct()
                 .all()
             )
+            for t in matching_stops:
+                if t.train_number not in train_map:
+                    train_map[t.train_number] = t
+            matching = list(train_map.values())
 
         return matching
+
+    @staticmethod
+    def is_running_today(train: Train, target_date: Optional[date] = None, db: Optional[Session] = None) -> bool:
+        """
+        Determines whether a train is scheduled to operate on the target date (or today).
+        Parses running_days patterns: DAILY, Mon, Tue, Wed, Thu, Fri, Sat, Sun, SMTWTFS, commas, slashes.
+        Supports overnight journeys: if a train departed late yesterday and reaches the corridor today,
+        it evaluates as operating today.
+        """
+        if not train:
+            return False
+
+        pattern = (train.running_days or "DAILY").upper().strip()
+        if "DAILY" in pattern or pattern == "SMTWTFS" or "RUNS DAILY" in pattern or not pattern:
+            return True
+
+        d = target_date or datetime.now().date()
+        day_code = d.strftime("%a").upper()  # MON, TUE, WED, THU, FRI, SAT, SUN
+        day_full = d.strftime("%A").upper()  # MONDAY, TUESDAY, ...
+
+        tokens = [t.strip().upper() for t in re.split(r"[,/ ]+", pattern) if t.strip()]
+        for t in tokens:
+            if t == day_code or t == day_full or t.startswith(day_code) or day_code in t:
+                return True
+
+        # Overnight journey evaluation: check if train departed previous day and crosses today
+        if db:
+            yesterday = d - timedelta(days=1)
+            y_day_code = yesterday.strftime("%a").upper()
+            y_day_full = yesterday.strftime("%A").upper()
+            y_runs = any(
+                t == y_day_code or t == y_day_full or t.startswith(y_day_code) or y_day_code in t
+                for t in tokens
+            )
+            if y_runs:
+                # Check if train has stops with day_offset >= 1 or early morning traversal (< 360 min)
+                has_overnight_stop = (
+                    db.query(TrainRouteStop)
+                    .filter(
+                        TrainRouteStop.train_number == train.train_number,
+                        or_(TrainRouteStop.day_offset > 0, TrainRouteStop.arrival_min < 360)
+                    )
+                    .first()
+                )
+                if has_overnight_stop:
+                    return True
+
+        return False
+
+    @staticmethod
+    def get_candidate_trains_for_corridor(
+        db: Session,
+        corridor_id: Any,
+        target_date: Optional[date] = None
+    ) -> List[Train]:
+        """
+        Discovers all Scheduled Candidate Trains for a corridor on the given journey date.
+        1. Resolves corridor sections and stations
+        2. Queries all intersecting train routes (bidirectional, partial route)
+        3. Evaluates scheduled running days against the target date (including overnight journeys)
+        Returns the deduplicated, full candidate set without slicing.
+        """
+        all_corridor_trains = TrainService.get_trains_for_corridor(db, corridor_id)
+        d = target_date or datetime.now().date()
+        return [
+            t for t in all_corridor_trains
+            if TrainService.is_running_today(t, d, db)
+        ]
+
+    @staticmethod
+    def get_corridor_candidate_live_status(
+        db: Session,
+        corridor_ident: Any,
+        target_date: Optional[date] = None,
+        refresh: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Primary engine for Corridor Live Train Position & Candidate Discovery.
+        1. Discovers ALL scheduled candidate trains for today across corridor sections.
+        2. Deduplicates candidates.
+        3. Attempts live RailRadar lookup strictly for candidate trains (with rate limit protection).
+        4. Calculates deterministic mapping confidence (100%, 90%, 75%, 50%).
+        5. Computes honest stale data status (> 120s -> STALE LIVE DATA with age in minutes).
+        6. Preserves candidate trains when live data is unavailable (SCHEDULED — LIVE UNAVAILABLE).
+        7. Returns authoritative JSON payload matching SIH26027 specifications.
+        """
+        corr, sections, stn_list = TrainService.get_corridor_sections_and_stations(db, corridor_ident)
+        if not corr:
+            return {
+                "corridor": {"id": str(corridor_ident), "name": f"Corridor {corridor_ident}"},
+                "journeyDate": (target_date or date.today()).isoformat(),
+                "scheduledTrainCount": 0,
+                "liveAvailableCount": 0,
+                "liveUnavailableCount": 0,
+                "liveStatus": "NOT_FOUND",
+                "reason": "CORRIDOR_NOT_FOUND",
+                "trains": []
+            }
+
+        target_d = target_date or date.today()
+        all_trains = TrainService.get_trains_for_corridor(db, corr.id)
+        candidate_trains = [t for t in all_trains if TrainService.is_running_today(t, target_d, db)]
+        non_running_trains = [t for t in all_trains if not TrainService.is_running_today(t, target_d, db)]
+
+        # Check provider status & rate limit cooldown
+        provider = get_train_provider()
+        prov_status = "OK"
+        key = getattr(settings, "RAILRADAR_API_KEY", "") or ""
+        if not key or not key.strip():
+            prov_status = "KEY_MISSING"
+        elif getattr(provider, "_rate_limit_until", 0) > datetime.utcnow().timestamp():
+            prov_status = "RATE_LIMITED"
+
+        # Targeted live telemetry refresh if requested and healthy
+        if refresh and prov_status == "OK" and candidate_trains:
+            for t in candidate_trains:
+                try:
+                    provider.get_live_train(t.train_number)
+                except Exception as ex:
+                    err_str = str(ex)
+                    if "429" in err_str:
+                        prov_status = "RATE_LIMITED"
+                        break
+                    elif "401" in err_str:
+                        prov_status = "UNAUTHORIZED"
+                        break
+
+        now = datetime.utcnow()
+        stale_threshold = getattr(settings, "LIVE_DATA_STALE_AFTER_SECONDS", 120)
+        train_items = []
+        live_count = 0
+        unavailable_count = 0
+
+        for t in candidate_trains:
+            tm = db.query(TrainMovement).filter(TrainMovement.train_number == t.train_number).first()
+            is_live = False
+            is_stale = False
+            speed = None
+            delay = None
+            lat = None
+            lon = None
+            location_str = "—"
+            source_str = "Static Timetable"
+            last_upd_str = "—"
+            age_min = None
+
+            if tm:
+                age_sec = (now - tm.last_updated).total_seconds() if tm.last_updated else 9999
+                age_min = round(age_sec / 60.0, 1)
+                is_stale = age_sec > stale_threshold
+                is_live = not is_stale and bool(getattr(tm, "is_live", True))
+
+                if is_live:
+                    live_status = tm.status or "RUNNING"
+                    speed = float(tm.speed_kmh) if tm.speed_kmh is not None else 0.0
+                    delay = int(tm.delay_minutes) if tm.delay_minutes is not None else 0
+                    lat = float(tm.latitude) if tm.latitude is not None else None
+                    lon = float(tm.longitude) if tm.longitude is not None else None
+                    sec_name = tm.current_section.name if tm.current_section else (tm.current_station_code or "EN ROUTE")
+                    location_str = f"{tm.current_section.section_id}: {sec_name}" if tm.current_section else sec_name
+                    source_str = "RailRadar Live"
+                    last_upd_str = tm.last_updated.strftime("%H:%M:%S") if tm.last_updated else "—"
+                    live_count += 1
+                elif is_stale:
+                    live_status = "STALE LIVE DATA"
+                    speed = float(tm.speed_kmh) if tm.speed_kmh is not None else 0.0
+                    delay = int(tm.delay_minutes) if tm.delay_minutes is not None else 0
+                    lat = float(tm.latitude) if tm.latitude is not None else None
+                    lon = float(tm.longitude) if tm.longitude is not None else None
+                    sec_name = tm.current_section.name if tm.current_section else (tm.current_station_code or "EN ROUTE")
+                    location_str = f"{tm.current_section.section_id}: {sec_name} (Stale)" if tm.current_section else sec_name
+                    source_str = f"Live Radar (Stale — {age_min}m old)"
+                    last_upd_str = tm.last_updated.strftime("%H:%M:%S") if tm.last_updated else "—"
+                    unavailable_count += 1
+                else:
+                    live_status = "SCHEDULED — LIVE UNAVAILABLE"
+                    source_str = "Timetable Master (IRCTC/SR)"
+                    unavailable_count += 1
+            else:
+                live_status = "SCHEDULED — LIVE UNAVAILABLE"
+                source_str = "Timetable Master (IRCTC/SR)"
+                unavailable_count += 1
+
+            # Stop progression, entry/exit, and direction
+            stops = (
+                db.query(TrainRouteStop)
+                .filter(TrainRouteStop.train_number == t.train_number)
+                .order_by(TrainRouteStop.sequence)
+                .all()
+            )
+            c_stops = [s for s in stops if s.station_code in stn_list]
+            sched_entry = "—"
+            sched_exit = "—"
+            direction = "UP"
+
+            if c_stops:
+                s_first = c_stops[0]
+                s_last = c_stops[-1]
+                sched_entry = f"{s_first.arrival_min // 60:02d}:{s_first.arrival_min % 60:02d}"
+                sched_exit = f"{s_last.departure_min // 60:02d}:{s_last.departure_min % 60:02d}"
+                if s_first.station_code == corr.start_station_code or (
+                    corr.start_station_code and s_first.station_code in [corr.start_station_code, "MDU", "TDN", "TMQ"]
+                ):
+                    direction = "DOWN"
+                else:
+                    direction = "UP"
+
+            if location_str == "—" and c_stops:
+                location_str = f"Section En Route ({c_stops[0].station_code} ↔ {c_stops[-1].station_code})"
+
+            # Deterministic Mapping Confidence
+            corr_stops_cnt = len(c_stops)
+            if corr_stops_cnt >= 4:
+                conf = 100
+                method = "EXACT_ROUTE_SECTION_MATCH"
+                reason = "Exact route stop sequence matched to RailwaySection master."
+            elif corr_stops_cnt >= 2:
+                conf = 90
+                method = "VERIFIED_STATION_SEQUENCE"
+                reason = "Verified station sequence matched to corridor alignment."
+            elif corr_stops_cnt == 1:
+                conf = 75
+                method = "PARTIAL_ROUTE_MATCH"
+                reason = "Partial route intersection within corridor section boundaries."
+            else:
+                conf = 50
+                method = "INFERRED_MAPPING"
+                reason = "Inferred mapping based on corridor network topology."
+
+            train_items.append({
+                "train_number": t.train_number,
+                "train_name": t.train_name,
+                "train_type": t.train_type or "EXPRESS",
+                "category": t.category or t.train_type or "EXPRESS",
+                "source_code": t.source_code or "",
+                "source_name": t.source_name or "",
+                "destination_code": t.destination_code or "",
+                "destination_name": t.destination_name or "",
+                "scheduled": "Scheduled Today",
+                "scheduled_entry": sched_entry,
+                "scheduled_exit": sched_exit,
+                "running_days": t.running_days or "DAILY",
+                "direction": direction,
+                "live_status": live_status,
+                "current_location": location_str,
+                "latitude": lat,
+                "longitude": lon,
+                "speed_kmh": speed,
+                "delay_minutes": delay,
+                "mapping_confidence": conf,
+                "mapping_method": method,
+                "mapping_reason": reason,
+                "source": source_str,
+                "is_live": is_live,
+                "is_stale": is_stale,
+                "last_updated": last_upd_str,
+                "age_minutes": age_min
+            })
+
+        scheduled_cnt = len(train_items)
+        if live_count == scheduled_cnt and scheduled_cnt > 0:
+            overall_status = "LIVE"
+        elif live_count > 0:
+            overall_status = "PARTIAL"
+        else:
+            overall_status = "LIVE_DATA_UNAVAILABLE"
+
+        reason_code = "OK" if live_count > 0 else (
+            "RATE_LIMITED" if prov_status == "RATE_LIMITED" else (
+                "KEY_MISSING" if prov_status == "KEY_MISSING" else "UNAVAILABLE"
+            )
+        )
+
+        return {
+            "corridor": {
+                "id": corr.prototype_code or corr.corridor_id,
+                "name": corr.name
+            },
+            "journeyDate": target_d.isoformat(),
+            "scheduledTrainCount": scheduled_cnt,
+            "liveAvailableCount": live_count,
+            "liveUnavailableCount": unavailable_count,
+            "liveStatus": overall_status,
+            "reason": reason_code,
+            "nonRunningTrainCount": len(non_running_trains),
+            "trains": train_items
+        }
 
 
     @staticmethod
@@ -669,15 +1020,46 @@ class TrainService:
         query = db.query(TrainMovement, Train).outerjoin(Train, TrainMovement.train_number == Train.train_number)
 
         if corridor_id:
-            eligible_trains = TrainService.get_eligible_tn_trains(db, corridor_id=corridor_id)
-            corr_train_nums = [t.train_number for t in eligible_trains]
-            corr_sec_ids = [s.id for s in db.query(RailwaySection.id).filter(RailwaySection.corridor_id == corridor_id).all()]
-            query = query.filter(
-                or_(
-                    TrainMovement.train_number.in_(corr_train_nums),
-                    TrainMovement.current_section_id.in_(corr_sec_ids)
-                )
+            status_payload = TrainService.get_corridor_candidate_live_status(
+                db, corridor_ident=corridor_id, refresh=refresh
             )
+            res_items = []
+            for item in status_payload.get("trains", []):
+                res_items.append({
+                    "train_number": item["train_number"],
+                    "train_name": item["train_name"],
+                    "train_type": item["train_type"],
+                    "latitude": item["latitude"],
+                    "longitude": item["longitude"],
+                    "speed_kmh": item["speed_kmh"],
+                    "delay_minutes": item["delay_minutes"],
+                    "direction": item["direction"],
+                    "status": item["live_status"],
+                    "live_status": item["live_status"],
+                    "current_station_code": item.get("source_code", ""),
+                    "next_halt": item.get("destination_code", ""),
+                    "previous_halt": item.get("source_code", ""),
+                    "current_section_id": None,
+                    "section_id": None,
+                    "section_code": item["current_location"],
+                    "section_name": item["current_location"],
+                    "current_location": item["current_location"],
+                    "mapping_confidence": (item["mapping_confidence"] / 100.0) if item.get("mapping_confidence") is not None else 0.95,
+                    "mapping_confidence_pct": item.get("mapping_confidence", 95),
+                    "mapping_method": item.get("mapping_method"),
+                    "mapping_reason": item.get("mapping_reason"),
+                    "source": item["source"],
+                    "provenance_status": "LIVE" if item["is_live"] else ("STALE" if item.get("is_stale") else "UNAVAILABLE"),
+                    "is_live": item["is_live"],
+                    "is_stale": item.get("is_stale", False),
+                    "last_updated": item["last_updated"],
+                    "age_minutes": item.get("age_minutes"),
+                    "scheduled": item["scheduled"],
+                    "scheduled_entry": item["scheduled_entry"],
+                    "scheduled_exit": item["scheduled_exit"],
+                    "running_days": item["running_days"]
+                })
+            return res_items
         else:
             # Global live tracking: strictly TN-relevant trains or untagged active movements
             query = query.filter(
@@ -909,6 +1291,9 @@ class TrainService:
             }
 
         corridor = db.query(Corridor).filter(Corridor.id == corridor_id).first()
+        if not corridor and isinstance(corridor_id, int):
+            proto_code = f"C{corridor_id:02d}"
+            corridor = db.query(Corridor).filter(Corridor.prototype_code == proto_code).first()
         if not corridor:
             now = datetime.utcnow()
             return {
@@ -1066,19 +1451,15 @@ class TrainService:
         trains_resp = []
 
         for t in trains_db:
-            m_data = mov_map.get(t.train_number)
-            if not m_data and settings.TRAIN_DATA_MODE.lower() == "live":
-                # In live mode without telemetry, omit train trajectory
-                continue
-
-            m_data = m_data or {}
-            delay_min = m_data.get("delay_minutes", 0)
-            speed = m_data.get("speed_kmh", 0.0)
+            m_data = mov_map.get(t.train_number) or {}
+            is_live_flag = bool(m_data.get("is_live", False))
+            delay_min = m_data.get("delay_minutes", 0) if is_live_flag else 0
+            speed = m_data.get("speed_kmh", 0.0) if is_live_flag else 0.0
             direction = m_data.get("direction", "UP")
             sec_id = m_data.get("section_id")
             sec_code = m_data.get("section_code")
             sec_name = m_data.get("section_name")
-            m_source = m_data.get("source", "RAILRADAR" if settings.TRAIN_DATA_MODE.lower() == "live" else "SIMULATED")
+            m_source = m_data.get("source", "TIMETABLE_MASTER")
 
             # Route stops
             stops = db.query(TrainRouteStop).filter(TrainRouteStop.train_number == t.train_number).order_by(TrainRouteStop.sequence).all()

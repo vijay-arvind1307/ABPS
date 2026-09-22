@@ -217,7 +217,7 @@ class CompatibilityEngine:
                 return f"SEC_ID_{j.section_id}"
             if j.section and getattr(j.section, 'section_id', None):
                 return f"SEC_ID_{j.section.section_id}"
-            if j.section_name:
+            if getattr(j, "section_name", None):
                 return f"SEC_NAME_{j.section_name}"
             # Fallback to station pair if section not populated
             stn1 = j.start_station_code or "DEF1"
@@ -250,7 +250,8 @@ class CompatibilityEngine:
             if len(b_jobs) == 1:
                 # Individual block fallback
                 j = b_jobs[0]
-                sec_display = j.section.name if j.section else (j.section_name or f"SECTION-{j.section_id or 103}")
+                sec_name_val = getattr(j, "section_name", None)
+                sec_display = j.section.name if j.section else (sec_name_val or f"SECTION-{j.section_id or 103}")
                 groups.append({
                     "group_id": f"GRP-{group_counter:02d}",
                     "coordination_type": "INDIVIDUAL_BLOCK",
@@ -391,22 +392,85 @@ class CoordinatedOptimizer:
         win_start = matched_windows[0]["start_min"] if matched_windows else pref_start
         win_end = win_start + common_duration
 
-        # 3. Formulate Alternatives: Plan A / Plan B / Plan C
-        # PLAN A — Recommended Best Coordination
+        # 3. Solve with OR-Tools CP-SAT Solver across candidate windows
+        from app.algorithms.optimizer import CPSATSolver
+
+        job_dicts = []
+        for j in compatible_jobs:
+            job_dicts.append({
+                "id": j.id,
+                "job_code": j.job_code,
+                "section_id": ref_job.section_id or (section.id if section else 1),
+                "estimated_duration_min": j.estimated_duration_min or 60,
+                "priority_score": j.priority_score or 50.0,
+                "is_emergency": getattr(j, "is_emergency", False),
+                "safety_tier": getattr(j, "safety_tier", "Tier 3 (Normal)"),
+                "department": j.department.code if j.department else "ENGG",
+                "compatible_job_ids": [other.id for other in compatible_jobs if other.id != j.id]
+            })
+
+        win_dicts = []
+        if matched_windows:
+            for idx, w in enumerate(matched_windows[:5]):
+                win_dicts.append({
+                    "id": w.get("id", idx + 1),
+                    "section_id": ref_job.section_id or (section.id if section else 1),
+                    "start_min": w.get("start_min", win_start),
+                    "end_min": w.get("end_min", win_start + w.get("usable_duration_min", common_duration)),
+                    "usable_duration_min": w.get("usable_duration_min", common_duration)
+                })
+        else:
+            win_dicts.append({
+                "id": 1,
+                "section_id": ref_job.section_id or (section.id if section else 1),
+                "start_min": win_start,
+                "end_min": win_start + common_duration + 30,
+                "usable_duration_min": common_duration + 30
+            })
+
+        # Provide distinct alternative slots for Plan B & Plan C if only 1 window is available
+        if len(win_dicts) < 2:
+            alt_b_start = max(780, win_start + 120)
+            win_dicts.append({
+                "id": 2,
+                "section_id": ref_job.section_id or (section.id if section else 1),
+                "start_min": alt_b_start,
+                "end_min": alt_b_start + common_duration + 30,
+                "usable_duration_min": common_duration + 30
+            })
+        if len(win_dicts) < 3:
+            alt_c_start = max(960, win_dicts[1]["start_min"] + 120)
+            win_dicts.append({
+                "id": 3,
+                "section_id": ref_job.section_id or (section.id if section else 1),
+                "start_min": alt_c_start,
+                "end_min": alt_c_start + common_duration + 60,
+                "usable_duration_min": common_duration + 60
+            })
+
+        solver = CPSATSolver(time_limit_seconds=5)
+        sol_a = solver.solve(job_dicts, win_dicts, strategy="PLAN_A")
+        sol_b = solver.solve(job_dicts, win_dicts, strategy="PLAN_B")
+        sol_c = solver.solve(job_dicts, win_dicts, strategy="PLAN_C")
+
+        # Derive dynamic metrics from CP-SAT solutions
+        def compute_plan_score(sol: Dict[str, Any], default_val: float) -> float:
+            if sol.get("solver_status") in ("OPTIMAL", "FEASIBLE"):
+                return round(min(98.5, max(50.0, float(sol.get("asset_availability_proxy", default_val)))), 1)
+            return default_val
+
         plan_a_start = win_start
         plan_a_end = plan_a_start + common_duration
         plan_a_time = f"{min_to_hhmm(plan_a_start)} – {min_to_hhmm(plan_a_end)}"
-        plan_a_score = 96.0
+        plan_a_score = compute_plan_score(sol_a, 94.5)
 
-        # PLAN B — Alternative Window (e.g. 13:00 - 14:30)
-        plan_b_start = max(780, win_start + 135)
+        plan_b_start = win_dicts[1]["start_min"] if len(win_dicts) > 1 else max(780, win_start + 120)
         plan_b_end = plan_b_start + common_duration
         plan_b_time = f"{min_to_hhmm(plan_b_start)} – {min_to_hhmm(plan_b_end)}"
-        plan_b_score = 89.0
+        plan_b_score = compute_plan_score(sol_b, max(60.0, plan_a_score - 7.0))
 
-        # PLAN C — Fallback / Separate Scheduling
-        plan_c_score = 72.0
-        plan_c_time = "Separate staggered blocks (10:00–11:30, 12:30–13:30, 14:00–15:15)"
+        plan_c_score = compute_plan_score(sol_c, max(50.0, plan_b_score - 12.0))
+        plan_c_time = f"Staggered individual blocks ({min_to_hhmm(plan_a_start)}, {min_to_hhmm(plan_b_start)})"
 
         # Work breakdown per job for Plan A
         work_breakdown = []
@@ -554,18 +618,40 @@ class CoordinatedOptimizer:
         plan_a_start = pref_start
         plan_a_end = plan_a_start + duration
         plan_a_time = f"{min_to_hhmm(plan_a_start)} – {min_to_hhmm(plan_a_end)}"
-        plan_a_score = 82.0
 
         plan_b_start = plan_a_start + 120
         plan_b_end = plan_b_start + duration
         plan_b_time = f"{min_to_hhmm(plan_b_start)} – {min_to_hhmm(plan_b_end)}"
-        plan_b_score = 76.0
 
         plan_c_time = f"{min_to_hhmm(plan_a_start + 240)} – {min_to_hhmm(plan_a_start + 240 + duration)}"
-        plan_c_score = 70.0
 
         dept_name = job.department.name if job.department else "Engineering"
         dept_code = job.department.code if job.department else "ENGG"
+
+        # Solve with OR-Tools CP-SAT for single job
+        from app.algorithms.optimizer import CPSATSolver
+        s_job_dict = [{
+            "id": job.id,
+            "job_code": job.job_code,
+            "section_id": job.section_id or (section.id if section else 1),
+            "estimated_duration_min": duration,
+            "priority_score": job.priority_score or 50.0,
+            "is_emergency": getattr(job, "is_emergency", False),
+            "safety_tier": getattr(job, "safety_tier", "Tier 3 (Normal)"),
+            "department": dept_code
+        }]
+        s_win_candidates = [
+            {"id": 1, "section_id": job.section_id or 1, "start_min": plan_a_start, "end_min": plan_a_start + duration + 30, "usable_duration_min": duration + 30},
+            {"id": 2, "section_id": job.section_id or 1, "start_min": plan_b_start, "end_min": plan_b_start + duration + 30, "usable_duration_min": duration + 30}
+        ]
+        s_solver = CPSATSolver(time_limit_seconds=3)
+        sol_s_a = s_solver.solve(s_job_dict, s_win_candidates[:1], strategy="PLAN_A")
+        sol_s_b = s_solver.solve(s_job_dict, s_win_candidates[1:], strategy="PLAN_B")
+
+        base_p = job.priority_score or 50.0
+        plan_a_score = round(min(96.0, max(65.0, float(sol_s_a.get("asset_availability_proxy", base_p + 15.0)))), 1)
+        plan_b_score = round(max(55.0, float(sol_s_b.get("asset_availability_proxy", plan_a_score - 6.0))), 1)
+        plan_c_score = round(max(50.0, plan_b_score - 8.0), 1)
 
         work_breakdown = [{
             "job_id": job.id,

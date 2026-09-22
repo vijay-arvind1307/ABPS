@@ -23,12 +23,20 @@ def setup_test_db():
         db.query(BlockPlan).delete()
         db.query(MaintenanceJobResource).delete()
         db.query(MaintenanceJob).delete()
-        db.query(TrainRouteStop).delete()
-        db.query(TrainMovement).delete()
-        db.query(Train).delete()
+        db.query(TrainRouteStop).filter(TrainRouteStop.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
+        db.query(TrainMovement).filter(TrainMovement.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
+        db.query(Train).filter(Train.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db.commit()
 
         seed_database(db)
+
+        if db.query(Train).count() == 0:
+            try:
+                from app.scripts.import_railway_documents import RailwayDocumentImporter
+                RailwayDocumentImporter(db).import_all()
+            except Exception as e:
+                print(f"[CONFTEST] Document import notice: {e}")
+
 
         # Add test trains for algorithm & flow tests
         stn_ndls = db.query(Station).filter(Station.code == "NDLS").first()
@@ -134,10 +142,19 @@ def setup_test_db():
         db_clean.query(BlockPlan).delete()
         db_clean.query(MaintenanceJobResource).delete()
         db_clean.query(MaintenanceJob).delete()
-        db_clean.query(TrainRouteStop).delete()
-        db_clean.query(TrainMovement).delete()
-        db_clean.query(Train).delete()
+        db_clean.query(TrainRouteStop).filter(TrainRouteStop.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
+        db_clean.query(TrainMovement).filter(TrainMovement.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
+        db_clean.query(Train).filter(Train.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db_clean.commit()
+
+        # Ensure authoritative timetable trains are present
+        if db_clean.query(Train).count() == 0:
+            try:
+                from app.scripts.import_railway_documents import RailwayDocumentImporter
+                RailwayDocumentImporter(db_clean).import_all()
+            except Exception as ex:
+                print(f"[CONFTEST TEARDOWN] Importer notice: {ex}")
     finally:
         db_clean.close()
     settings.TRAIN_DATA_MODE = "live"
+

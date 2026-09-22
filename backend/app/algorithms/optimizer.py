@@ -277,22 +277,23 @@ class CPSATSolver:
 
         for j in jobs:
             j_id = j["id"]
+            assigned_w_id = None
             if solver.Value(is_scheduled[j_id]) == 1:
-                assigned_w_id = None
                 for w_id in candidate_windows_for_job[j_id]:
                     if (j_id, w_id) in x and solver.Value(x[(j_id, w_id)]) == 1:
                         assigned_w_id = w_id
                         break
 
+            if assigned_w_id is not None and assigned_w_id in window_map:
                 s_val = solver.Value(start_time[j_id])
                 e_val = solver.Value(end_time[j_id])
-                blk_code = f"BLK_SEC{j['section_id']}_W{assigned_w_id}"
+                blk_code = f"BLK_SEC{j.get('section_id', 1)}_W{assigned_w_id}"
 
                 scheduled_jobs_result.append({
                     "job_id": j_id,
                     "job_code": j.get("job_code", f"JOB_{j_id}"),
                     "window_id": assigned_w_id,
-                    "section_id": j["section_id"],
+                    "section_id": j.get("section_id"),
                     "scheduled_start_min": s_val,
                     "scheduled_end_min": e_val,
                     "scheduled_duration_min": j["estimated_duration_min"],
@@ -302,15 +303,16 @@ class CPSATSolver:
                 })
 
                 if blk_code not in block_assignments:
+                    w_info = window_map[assigned_w_id]
                     block_assignments[blk_code] = {
                         "block_code": blk_code,
                         "window_id": assigned_w_id,
-                        "section_id": j["section_id"],
+                        "section_id": j.get("section_id"),
                         "jobs": [],
                         "total_duration": 0,
-                        "window_start": window_map[assigned_w_id]["start_min"],
-                        "window_end": window_map[assigned_w_id]["end_min"],
-                        "usable_duration": window_map[assigned_w_id]["usable_duration_min"]
+                        "window_start": w_info["start_min"],
+                        "window_end": w_info["end_min"],
+                        "usable_duration": w_info["usable_duration_min"]
                     }
                 block_assignments[blk_code]["jobs"].append(j_id)
                 block_assignments[blk_code]["total_duration"] += j["estimated_duration_min"]

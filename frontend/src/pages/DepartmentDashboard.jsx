@@ -1437,16 +1437,16 @@ export default function DepartmentDashboard() {
                 />
               </div>
 
-              {/* Corridor Selector (Tamil Nadu Network C01-C20) */}
+              {/* Corridor Selector (Tamil Nadu Network C01-C46) */}
               <div>
                 <label className="font-bold text-slate-700 block mb-1">
-                  CORRIDOR SELECTION (TAMIL NADU PROTOTYPE NETWORK C01–C20)
+                  CORRIDOR SELECTION (TAMIL NADU PROTOTYPE NETWORK C01–C46)
                 </label>
                 <select
                   value={formData.corridor_id || ''}
                   onChange={async (e) => {
                     const cId = e.target.value ? parseInt(e.target.value) : null;
-                    const selCorr = corridors.find(c => c.id === cId);
+                    const selCorr = (corridors || []).find(c => c.id === cId);
                     setFormData(prev => ({
                       ...prev,
                       corridor_id: cId,
@@ -1467,12 +1467,15 @@ export default function DepartmentDashboard() {
                   }}
                   className="w-full border border-slate-300 p-1.5 font-bold bg-white text-slate-900"
                 >
-                  <option value="">[ -- SELECT TAMIL NADU CORRIDOR (C01–C20) -- ]</option>
-                  {corridors.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.prototype_code ? `${c.prototype_code}: ` : ''}{c.name} ({c.start_station_code} ↔ {c.end_station_code}) — {c.sections_count || 0} Sections
-                    </option>
-                  ))}
+                  <option value="">[ -- SELECT TAMIL NADU CORRIDOR (C01–C46) -- ]</option>
+                  {(corridors || [])
+                    .filter(c => c.prototype_code && /^C(0[1-9]|[1-3][0-9]|4[0-6])$/.test(c.prototype_code))
+                    .sort((a, b) => (a.prototype_code || '').localeCompare(b.prototype_code || ''))
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        [{c.prototype_code}] {c.name} ({c.start_station_code} ↔ {c.end_station_code}) — {c.sections_count || 0} Sections
+                      </option>
+                    ))}
                 </select>
               </div>
 

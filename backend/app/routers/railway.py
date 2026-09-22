@@ -294,11 +294,12 @@ def get_corridors(
     division: Optional[str] = Query(None, description="Filter by railway division"),
     status: Optional[str] = Query(None, description="Filter by status (ACTIVE, FIXTURE, ALL)"),
     include_fixtures: bool = Query(False, description="Include test fixture corridors"),
+    canonical_only: bool = Query(True, description="Return strictly authoritative C01-C46 operational corridors"),
     db: Session = Depends(get_db)
 ):
     """
     Returns authentic railway operational corridors.
-    By default filters to ACTIVE Southern Railway corridors.
+    By default filters to ACTIVE Southern Railway canonical C01-C46 corridors.
     """
     query = db.query(Corridor)
     if zone:
@@ -308,21 +309,29 @@ def get_corridors(
     if status and status.upper() != "ALL":
         query = query.filter(Corridor.status == status.upper())
     elif not include_fixtures and (not status or status.upper() != "ALL"):
-        # By default only return ACTIVE corridors (excludes FIXTURE like Delhi-DDU)
+        # By default only return ACTIVE corridors (excludes FIXTURE like Delhi-DDU and NETWORK_METADATA)
         query = query.filter(Corridor.status == "ACTIVE")
 
-    corrs = query.order_by(Corridor.id).all()
+    if canonical_only:
+        query = query.filter(Corridor.prototype_code.isnot(None))
+
+    def proto_sort_key(c):
+        p = getattr(c, "prototype_code", "") or ""
+        if p.startswith("C") and p[1:].isdigit():
+            return (0, int(p[1:]))
+        return (1, c.id)
+
+    corrs = query.all()
+    if canonical_only:
+        corrs = [c for c in corrs if getattr(c, "prototype_code", "") and getattr(c, "prototype_code", "").startswith("C") and getattr(c, "prototype_code", "")[1:].isdigit() and 1 <= int(getattr(c, "prototype_code", "")[1:]) <= 46]
+
+    corrs.sort(key=proto_sort_key)
     results = []
     for c in corrs:
-        sec_cnt = len(c.sections) if c.sections else 0
-        stn_ids = set()
-        if c.sections:
-            for s in c.sections:
-                if s.from_station_id:
-                    stn_ids.add(s.from_station_id)
-                if s.to_station_id:
-                    stn_ids.add(s.to_station_id)
-        stn_cnt = len(stn_ids) if stn_ids else (sec_cnt + 1 if sec_cnt > 0 else 2)
+        proto = getattr(c, "prototype_code", None)
+        net_c = RailwayNetworkService.get_corridor(proto) if proto else None
+        sec_cnt = net_c.get("sections_count") if net_c else (len(c.sections) if c.sections else 0)
+        stn_cnt = net_c.get("stations_count") if net_c else (sec_cnt + 1 if sec_cnt > 0 else 2)
 
         results.append({
             "id": c.id,
@@ -342,18 +351,89 @@ def get_corridors(
     return results
 
 
+def _resolve_corridor(corridor_ident: str, db: Session) -> Optional[Corridor]:
+    if not corridor_ident:
+        return None
+    s = str(corridor_ident).strip()
+    if s.isdigit():
+        return db.query(Corridor).filter(Corridor.id == int(s)).first()
+    norm = s.upper()
+
+    # 1. Exact match on corridor_id or prototype_code
+    exact = db.query(Corridor).filter(
+        or_(
+            Corridor.corridor_id == norm,
+            Corridor.prototype_code == norm
+        )
+    ).first()
+    if exact:
+        return exact
+
+    # 2. Fallback to mapped canonical prototype code
+    legacy_map = {
+        "CORR_MDU_TEN": "CORR_C40_MDU_TEN",
+        "CORR_MAS_AJJ": "CORR_C01_MAS_AJJ",
+        "CORR_AJJ_JTJ": "CORR_C02_AJJ_JTJ",
+        "CORR_MAS_GDR": "CORR_C03_MAS_GDR"
+    }
+    eff = legacy_map.get(norm, norm)
+    return db.query(Corridor).filter(
+        or_(
+            Corridor.corridor_id == eff,
+            Corridor.prototype_code == eff
+        )
+    ).first()
+
+
 @router.get("/corridors/{corridor_ident}")
 def get_corridor_by_id(corridor_ident: str, db: Session = Depends(get_db)):
-    """Fetch single corridor by integer ID or string code (e.g. CORR_MDU_TEN)."""
-    if corridor_ident.isdigit():
-        corr = db.query(Corridor).filter(Corridor.id == int(corridor_ident)).first()
-    else:
-        corr = db.query(Corridor).filter(Corridor.corridor_id == corridor_ident.strip().upper()).first()
-
+    """Fetch single corridor by integer ID or string code with ordered stations, sections, and geometry."""
+    corr = _resolve_corridor(corridor_ident, db)
     if not corr:
         raise HTTPException(status_code=404, detail=f"Corridor '{corridor_ident}' not found")
 
     sections = db.query(RailwaySection).filter(RailwaySection.corridor_id == corr.id).order_by(RailwaySection.id).all()
+    
+    # Retrieve authoritative network metadata and geometry
+    proto = getattr(corr, "prototype_code", None)
+    geom_data = RailwayNetworkService.get_corridor_geometry(proto) if proto else None
+    if not geom_data:
+        geom_data = RailwayNetworkService.get_corridor_geometry(corr.corridor_id)
+
+    stations_list = []
+    if geom_data and "stations" in geom_data:
+        stations_list = geom_data["stations"]
+    else:
+        stn_set = []
+        for s in sections:
+            if s.from_station and s.from_station.code and s.from_station.code not in stn_set:
+                stn_set.append(s.from_station.code)
+            if s.to_station and s.to_station.code and s.to_station.code not in stn_set:
+                stn_set.append(s.to_station.code)
+        stations_list = stn_set
+
+    sections_list = [
+        {
+            "id": s.id,
+            "section_id": s.section_id,
+            "name": s.name,
+            "from_station_code": s.from_station.code if s.from_station else None,
+            "to_station_code": s.to_station.code if s.to_station else None,
+            "from_station_name": s.from_station.name if s.from_station else None,
+            "to_station_name": s.to_station.name if s.to_station else None,
+            "length_km": s.length_km,
+            "track_type": s.track_type,
+            "direction": s.direction,
+            "coordinates": s.geometry_geojson if isinstance(s.geometry_geojson, list) else []
+        }
+        for s in sections
+    ]
+
+    geometry_obj = geom_data.get("geometry") if geom_data else {
+        "type": "LineString",
+        "coordinates": []
+    }
+
     return {
         "id": corr.id,
         "corridor_id": corr.corridor_id,
@@ -366,18 +446,19 @@ def get_corridor_by_id(corridor_ident: str, db: Session = Depends(get_db)):
         "status": corr.status,
         "prototype_code": getattr(corr, "prototype_code", None),
         "description": getattr(corr, "description", None),
-        "sections_count": len(sections)
+        "sections_count": len(sections_list),
+        "stations_count": len(stations_list),
+        "stations": stations_list,
+        "sections": sections_list,
+        "geometry": geometry_obj,
+        "leaflet_latlngs": geom_data.get("leaflet_latlngs") if geom_data else []
     }
 
 
 @router.get("/corridors/{corridor_ident}/stations")
 def get_corridor_stations(corridor_ident: str, db: Session = Depends(get_db)):
     """Returns ordered list of stations along this corridor with cumulative distance."""
-    if corridor_ident.isdigit():
-        corr = db.query(Corridor).filter(Corridor.id == int(corridor_ident)).first()
-    else:
-        corr = db.query(Corridor).filter(Corridor.corridor_id == corridor_ident.strip().upper()).first()
-
+    corr = _resolve_corridor(corridor_ident, db)
     if not corr:
         raise HTTPException(status_code=404, detail=f"Corridor '{corridor_ident}' not found")
 
@@ -459,11 +540,7 @@ def get_corridor_stations(corridor_ident: str, db: Session = Depends(get_db)):
 @router.get("/corridors/{corridor_ident}/sections")
 def get_corridor_sections(corridor_ident: str, db: Session = Depends(get_db)):
     """Returns ordered list of railway sections belonging to this corridor."""
-    if corridor_ident.isdigit():
-        corr = db.query(Corridor).filter(Corridor.id == int(corridor_ident)).first()
-    else:
-        corr = db.query(Corridor).filter(Corridor.corridor_id == corridor_ident.strip().upper()).first()
-
+    corr = _resolve_corridor(corridor_ident, db)
     if not corr:
         raise HTTPException(status_code=404, detail=f"Corridor '{corridor_ident}' not found")
 
@@ -492,10 +569,15 @@ def get_corridor_sections(corridor_ident: str, db: Session = Depends(get_db)):
 @router.get("/corridors/{corridor_ident}/geometry")
 def get_corridor_geometry(corridor_ident: str, db: Session = Depends(get_db)):
     """Returns continuous GeoJSON LineString track geometry stitched along the entire corridor."""
-    if corridor_ident.isdigit():
-        corr = db.query(Corridor).filter(Corridor.id == int(corridor_ident)).first()
-    else:
-        corr = db.query(Corridor).filter(Corridor.corridor_id == corridor_ident.strip().upper()).first()
+    corr = _resolve_corridor(corridor_ident, db)
+
+    proto = getattr(corr, "prototype_code", None) if corr else corridor_ident.strip().upper()
+    geom_data = RailwayNetworkService.get_corridor_geometry(proto) if proto else None
+    if not geom_data and corr:
+        geom_data = RailwayNetworkService.get_corridor_geometry(corr.corridor_id)
+
+    if geom_data:
+        return geom_data
 
     if not corr:
         raise HTTPException(status_code=404, detail=f"Corridor '{corridor_ident}' not found")
@@ -504,6 +586,12 @@ def get_corridor_geometry(corridor_ident: str, db: Session = Depends(get_db)):
     continuous_coords = []
     for s in sections:
         coords = s.geometry_geojson if isinstance(s.geometry_geojson, list) else []
+        if isinstance(coords, str):
+            try:
+                import json
+                coords = json.loads(coords)
+            except Exception:
+                coords = []
         for pt in coords:
             if continuous_coords and continuous_coords[-1] == pt:
                 continue
@@ -513,6 +601,7 @@ def get_corridor_geometry(corridor_ident: str, db: Session = Depends(get_db)):
         "type": "Feature",
         "properties": {
             "corridor_id": corr.corridor_id,
+            "prototype_code": getattr(corr, "prototype_code", None),
             "name": corr.name,
             "total_distance_km": corr.total_distance_km,
             "points_count": len(continuous_coords)
@@ -522,6 +611,19 @@ def get_corridor_geometry(corridor_ident: str, db: Session = Depends(get_db)):
             "coordinates": [[pt[1], pt[0]] for pt in continuous_coords]
         },
         "leaflet_latlngs": continuous_coords
+    }
+
+
+@router.get("/corridors/validate/all")
+def validate_all_corridors_endpoint():
+    """Runs automated geometry, continuity, and topology verification across all 46 corridors."""
+    from validate_corridors import validate_all_corridors
+    is_valid = validate_all_corridors()
+    return {
+        "valid": is_valid,
+        "total_corridors": 46,
+        "status": "PASS" if is_valid else "FAIL",
+        "specification": "SIH26027 Southern Railway System Map (01-04-2025)"
     }
 
 
@@ -550,11 +652,7 @@ def get_corridor_trains(corridor_ident: str, db: Session = Depends(get_db)):
     """
     Returns all trains whose route intersects the specified corridor.
     """
-    if corridor_ident.isdigit():
-        corr = db.query(Corridor).filter(Corridor.id == int(corridor_ident)).first()
-    else:
-        corr = db.query(Corridor).filter(Corridor.corridor_id == corridor_ident.strip().upper()).first()
-
+    corr = _resolve_corridor(corridor_ident, db)
     if not corr:
         raise HTTPException(status_code=404, detail=f"Corridor '{corridor_ident}' not found")
 
@@ -585,11 +683,7 @@ def get_corridor_trains_live(
     """
     Returns live train movements for trains on this corridor from DB cache.
     """
-    if corridor_ident.isdigit():
-        corr = db.query(Corridor).filter(Corridor.id == int(corridor_ident)).first()
-    else:
-        corr = db.query(Corridor).filter(Corridor.corridor_id == corridor_ident.strip().upper()).first()
-
+    corr = _resolve_corridor(corridor_ident, db)
     if not corr:
         raise HTTPException(status_code=404, detail=f"Corridor '{corridor_ident}' not found")
 

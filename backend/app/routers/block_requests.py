@@ -1193,6 +1193,7 @@ def _serialize_coordinated_plan(plan: CoordinatedBlockPlan, db: Session) -> Dict
 
     return {
         "id": plan.id,
+        "version": plan.version or 1,
         "plan_code": plan.plan_code,
         "corridor_id": plan.corridor_id,
         "corridor": plan.corridor_name or (f"{plan.corridor.name}" if plan.corridor else "CVP → TEN"),
@@ -1288,8 +1289,15 @@ def approve_coordinated_block_plan(
     if not plan:
         raise HTTPException(status_code=404, detail="Coordinated block plan not found.")
 
+    if plan.status in ("COMPLETED", "ACTIVE"):
+        raise HTTPException(status_code=400, detail="Completed or Active block plans cannot be modified or rescheduled.")
+
+    if req and req.version is not None and (plan.version or 1) != req.version:
+        raise HTTPException(status_code=409, detail=f"Concurrency conflict: Plan version {plan.version} has been modified by another planner. Refresh and try again.")
+
     old_st = plan.status
     plan.status = "APPROVED"
+    plan.version = (plan.version or 1) + 1
     plan.approved_at = datetime.utcnow()
     plan.approved_by_id = current_user.id
     plan.planner_reason = req.reason or "Authorized common block possession by Chief Section Controller"
@@ -1394,6 +1402,12 @@ def modify_coordinated_block_plan(
     if not plan:
         raise HTTPException(status_code=404, detail="Coordinated block plan not found.")
 
+    if plan.status in ("COMPLETED", "ACTIVE"):
+        raise HTTPException(status_code=400, detail="Completed or Active block plans cannot be modified or rescheduled.")
+
+    if req and req.version is not None and (plan.version or 1) != req.version:
+        raise HTTPException(status_code=409, detail=f"Concurrency conflict: Plan version {plan.version} has been modified by another planner. Refresh and try again.")
+
     if req.recommended_start_min is not None:
         plan.start_min = req.recommended_start_min
     if req.recommended_end_min is not None:
@@ -1401,6 +1415,7 @@ def modify_coordinated_block_plan(
         plan.duration_min = max(15, plan.end_min - plan.start_min)
 
     plan.status = "MODIFIED"
+    plan.version = (plan.version or 1) + 1
     plan.modification_reason = req.reason.strip()
 
     linked_jobs = db.query(MaintenanceJob).filter(MaintenanceJob.coordinated_plan_id == plan.id).all()
@@ -1553,6 +1568,24 @@ def what_if_coordinated_block_plan(
         new_dur = orig_dur
         impact_summary = f"Scenario {scenario} evaluated with adjusted sectional buffers."
 
+    # Check actual train conflicts for the simulated what-if window
+    from app.models.models import TrainSectionOccupancy
+    sec_id = plan.section_id
+    conflicts = []
+    if sec_id:
+        occupancies = db.query(TrainSectionOccupancy).filter(TrainSectionOccupancy.section_id == sec_id).all()
+        for occ in occupancies:
+            m_entry = occ.estimated_entry_min
+            m_exit = occ.estimated_exit_min
+            if m_entry is not None and m_exit is not None:
+                if not (new_end <= m_entry or new_start >= m_exit):
+                    conflicts.append(f"Train {occ.train_number} occupying section {min_to_hhmm(m_entry)}–{min_to_hhmm(m_exit)}")
+
+    conflicts_count = len(conflicts)
+    feasibility = "FEASIBLE" if conflicts_count == 0 else "CONFLICT_DETECTED"
+    if conflicts_count > 0:
+        impact_summary += f" Headway conflict detected with {conflicts_count} movement(s): {'; '.join(conflicts)}."
+
     audit = AuditLog(
         user_id=current_user.id,
         action="WHAT_IF_EXECUTED",
@@ -1562,7 +1595,9 @@ def what_if_coordinated_block_plan(
             "scenario": scenario,
             "perturbation": perturbation,
             "original_window": f"{min_to_hhmm(orig_start)} – {min_to_hhmm(orig_end)}",
-            "revised_window": f"{min_to_hhmm(new_start)} – {min_to_hhmm(new_end)}"
+            "revised_window": f"{min_to_hhmm(new_start)} – {min_to_hhmm(new_end)}",
+            "conflicts_count": conflicts_count,
+            "feasibility": feasibility
         }
     )
     db.add(audit)
@@ -1578,9 +1613,9 @@ def what_if_coordinated_block_plan(
         "what_if_duration_min": new_dur,
         "what_if_start_min": new_start,
         "what_if_end_min": new_end,
-        "hard_conflicts": 0,
-        "feasibility": "FEASIBLE",
-        "score": max(70.0, plan.objective_score - 3.0),
+        "hard_conflicts": conflicts_count,
+        "feasibility": feasibility,
+        "score": max(70.0, plan.objective_score - (3.0 if conflicts_count == 0 else 25.0)),
         "impact_summary": impact_summary,
         "base_plan": {
             "time_window": f"{min_to_hhmm(orig_start)} – {min_to_hhmm(orig_end)}",
@@ -1591,8 +1626,8 @@ def what_if_coordinated_block_plan(
         "simulated_plan": {
             "time_window": f"{min_to_hhmm(new_start)} – {min_to_hhmm(new_end)}",
             "duration_min": new_dur,
-            "conflicts_count": 0,
-            "score": max(70.0, plan.objective_score - 3.0)
+            "conflicts_count": conflicts_count,
+            "score": max(50.0, plan.objective_score - (3.0 if conflicts_count == 0 else 25.0))
         }
     }
 
@@ -1616,18 +1651,36 @@ def replan_coordinated_block_plan(
     if not plan:
         raise HTTPException(status_code=404, detail="Coordinated block plan not found.")
 
+    if plan.status in ("COMPLETED", "ACTIVE"):
+        raise HTTPException(status_code=400, detail="Completed or Active block plans cannot be rescheduled.")
+
     def min_to_hhmm(m: int) -> str:
         hh, mm = divmod(m, 60)
         return f"{hh:02d}:{mm:02d}"
 
     orig_window = f"{min_to_hhmm(plan.start_min)} – {min_to_hhmm(plan.end_min)}"
-    new_start = plan.start_min + 45
+
+    # Search next feasible window from sweep-line planning service
+    all_windows = PlanningService.generate_windows(db, corridor_id=plan.corridor_id)
+    future_windows = [
+        w for w in all_windows
+        if (plan.section_id is None or w.get("section_id") == plan.section_id)
+        and w.get("start_min", 0) > plan.start_min
+        and w.get("usable_duration_min", 0) >= plan.duration_min
+    ]
+
+    if future_windows:
+        new_start = future_windows[0]["start_min"]
+    else:
+        new_start = plan.start_min + 60
+
     new_end = new_start + plan.duration_min
     revised_window = f"{min_to_hhmm(new_start)} – {min_to_hhmm(new_end)}"
 
     plan.start_min = new_start
     plan.end_min = new_end
     plan.status = "REPLANNED"
+    plan.version = (plan.version or 1) + 1
 
     linked_jobs = db.query(MaintenanceJob).filter(MaintenanceJob.coordinated_plan_id == plan.id).all()
     for j in linked_jobs:

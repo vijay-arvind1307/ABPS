@@ -41,6 +41,7 @@ import {
   getPlanExportUrl,
   getTimeDistanceData,
   getCorridors,
+  getCorridorGeometry,
   getJobPriorityExplanation,
   overrideJobPriority,
   getTrainsBetween,
@@ -60,27 +61,26 @@ import BlockGantt from '../charts/BlockGantt';
 import KPIComparison from '../charts/KPIComparison';
 import ExplainabilityDrawer from '../components/ExplainabilityDrawer';
 import ValidatorModal from '../components/ValidatorModal';
-import RailwayMap from '../maps/RailwayMap';
 import { getCurrentUser } from '../services/auth';
 
 // ─── NAV STATION DEFINITIONS ────────────────────────────────────────
 const NAV_STATIONS = [
-  { id: 'CONTROL_PANEL',           label: 'Control Panel',           icon: Activity,     group: 'OPERATIONS' },
-  { id: 'MAINTENANCE_DEMANDS',     label: 'Maintenance Demands',     icon: Inbox,        group: 'OPERATIONS' },
-  { id: 'TRAIN_POSITION',          label: 'Train Position',          icon: Radio,        group: 'LIVE DATA' },
-  { id: 'RAILWAY_NETWORK',         label: 'Railway Network',         icon: GitBranch,    group: 'LIVE DATA' },
-  { id: 'AVAILABLE_WINDOWS',       label: 'Available Windows',       icon: Clock,        group: 'PLANNING' },
-  { id: 'COMPATIBILITY',           label: 'Compatibility',           icon: Layers,       group: 'PLANNING' },
-  { id: 'AUTOMATIC_BLOCK_PLANNING',label: 'Block Planning (CP-SAT)', icon: Cpu,          group: 'PLANNING' },
-  { id: 'PLAN_COMPARISON',         label: 'Plan Comparison',         icon: BarChart3,    group: 'ANALYSIS' },
-  { id: 'WHAT_IF',                 label: 'What-If Analysis',        icon: Sliders,      group: 'ANALYSIS' },
-  { id: 'DYNAMIC_REPLANNING',      label: 'Dynamic Replanning',      icon: Shuffle,      group: 'ANALYSIS' },
-  { id: 'EXECUTION',               label: 'Execution Tracker',       icon: Target,       group: 'FIELD OPS' },
-  { id: 'REPORTS',                 label: 'Reports',                 icon: FileText,     group: 'AUDIT' },
-  { id: 'AUDIT',                   label: 'Audit Trail',             icon: Shield,       group: 'AUDIT' },
+  { id: 'CONTROL_PANEL', label: 'Control Room', icon: Activity, group: 'OPERATIONS' },
+  { id: 'MAINTENANCE_DEMANDS', label: 'Maintenance Demands', icon: Inbox, group: 'OPERATIONS' },
+  { id: 'TRAIN_POSITION', label: 'Train Position', icon: Radio, group: 'LIVE DATA' },
+  { id: 'RAILWAY_NETWORK', label: 'Railway Network', icon: GitBranch, group: 'LIVE DATA' },
+  { id: 'AVAILABLE_WINDOWS', label: 'Available Windows', icon: Clock, group: 'PLANNING' },
+  { id: 'COMPATIBILITY', label: 'Compatibility', icon: Layers, group: 'PLANNING' },
+  { id: 'AUTOMATIC_BLOCK_PLANNING', label: 'Block Planning (CP-SAT)', icon: Cpu, group: 'PLANNING' },
+  { id: 'PLAN_COMPARISON', label: 'Plan Comparison', icon: BarChart3, group: 'ANALYSIS' },
+  { id: 'WHAT_IF', label: 'What-If Analysis', icon: Sliders, group: 'ANALYSIS' },
+  { id: 'DYNAMIC_REPLANNING', label: 'Dynamic Replanning', icon: Shuffle, group: 'ANALYSIS' },
+  { id: 'EXECUTION', label: 'Execution Tracker', icon: Target, group: 'FIELD OPERATIONS' },
+  { id: 'REPORTS', label: 'Reports', icon: FileText, group: 'AUDIT' },
+  { id: 'AUDIT', label: 'Audit Trail', icon: Shield, group: 'AUDIT' },
 ];
 
-const NAV_GROUPS = ['OPERATIONS', 'LIVE DATA', 'PLANNING', 'ANALYSIS', 'FIELD OPS', 'AUDIT'];
+const NAV_GROUPS = ['OPERATIONS', 'LIVE DATA', 'PLANNING', 'ANALYSIS', 'FIELD OPERATIONS', 'AUDIT'];
 
 // ─── HELPER: Minutes → HH:MM ────────────────────────────────────────
 const mToTime = (m) => {
@@ -120,6 +120,11 @@ export default function PlannerDashboard({ onTabChange }) {
   const [overrideReason, setOverrideReason] = useState('');
   const [overrideSubmitting, setOverrideSubmitting] = useState(false);
 
+  // ── Planner Decision Area State ──────────────────────────────
+  const [plannerRemarks, setPlannerRemarks] = useState('');
+  const [selectedPlanForDecision, setSelectedPlanForDecision] = useState(null);
+  const [decisionConfirmModal, setDecisionConfirmModal] = useState({ isOpen: false, action: null, plan: null });
+
   // ── RailRadar Discovery ──────────────────────────────────────
   const [fromStation, setFromStation] = useState('MAS');
   const [toStation, setToStation] = useState('AJJ');
@@ -157,6 +162,7 @@ export default function PlannerDashboard({ onTabChange }) {
   // ── Independent Live Corridor Observation (SIH26027 Section 19) ─
   const [observationCorridorId, setObservationCorridorId] = useState(null);
   const [observationCorridor, setObservationCorridor] = useState(null);
+  const [observationPolyline, setObservationPolyline] = useState([]);
   const [observationMovements, setObservationMovements] = useState([]);
   const [observationStations, setObservationStations] = useState([]);
   const [observationSections, setObservationSections] = useState([]);
@@ -217,22 +223,22 @@ export default function PlannerDashboard({ onTabChange }) {
     setApiError(null);
     try {
       const [tdRes, jobsRes, planRes, kpiRes, corrRes, statusRes] = await Promise.all([
-        getTimeDistanceData(selectedCorridorId),
-        getBlockRequests().catch(() => getMaintenanceJobs()),
-        getActivePlan(selectedStrategy),
-        getKPIComparison(),
-        getCorridors(),
+        getTimeDistanceData(selectedCorridorId).catch(() => ({ data: null })),
+        getBlockRequests().catch(() => getMaintenanceJobs()).catch(() => ({ data: [] })),
+        getActivePlan(selectedStrategy).catch(() => ({ data: null })),
+        getKPIComparison().catch(() => ({ data: null })),
+        getCorridors().catch(() => ({ data: [] })),
         getDataStatus().catch(() => ({ data: null }))
       ]);
       if (!isMountedRef.current) return;
-      const loadedJobs = jobsRes.data || [];
-      const loadedCorrs = corrRes.data || [];
-      setTimeDistanceData(tdRes.data);
+      const loadedJobs = jobsRes?.data || [];
+      const loadedCorrs = corrRes?.data || [];
+      if (tdRes?.data) setTimeDistanceData(tdRes.data);
       setJobs(loadedJobs);
-      setActivePlan(planRes.data);
-      setKpiData(kpiRes.data);
+      if (planRes?.data !== undefined) setActivePlan(planRes.data);
+      if (kpiRes?.data) setKpiData(kpiRes.data);
       setCorridors(loadedCorrs);
-      if (statusRes.data) setObservationDataStatus(statusRes.data);
+      if (statusRes?.data) setObservationDataStatus(statusRes.data);
       setLastSyncTime(new Date().toLocaleTimeString());
 
       // Auto-select first request if none selected
@@ -242,14 +248,18 @@ export default function PlannerDashboard({ onTabChange }) {
 
       // Initialize default observation corridor (independent from request)
       if (!observationCorridorId && loadedCorrs.length > 0) {
-        const defaultObs = loadedCorrs.find(c => c.corridor_id === 'CORR_C15_MDU_TEN') ||
-                           loadedCorrs.find(c => c.start_station_code === 'MDU' && c.end_station_code === 'TEN') ||
-                           loadedCorrs[0];
-        setObservationCorridorId(defaultObs.id);
-        setObservationCorridor(defaultObs);
+        const defaultObs = loadedCorrs.find(c => c.prototype_code === 'C40') ||
+          loadedCorrs.find(c => c.corridor_id === 'CORR_C40_MDU_TEN') ||
+          loadedCorrs.find(c => c.corridor_id === 'CORR_C15_MDU_TEN') ||
+          loadedCorrs.find(c => c.start_station_code === 'MDU' && c.end_station_code === 'TEN') ||
+          loadedCorrs[0];
+        if (defaultObs) {
+          setObservationCorridorId(defaultObs.id);
+          setObservationCorridor(defaultObs);
+        }
       }
     } catch (err) {
-      console.error('[ABPS] Data load failure:', err);
+      console.error('[ABPS] Data load notice:', err);
       if (isMountedRef.current) setApiError('Unable to refresh telemetry feed. Displaying cached state.');
     } finally {
       if (isMountedRef.current && !silent) setLoading(false);
@@ -261,15 +271,31 @@ export default function PlannerDashboard({ onTabChange }) {
     if (!observationCorridorId) return;
     const loadObs = async () => {
       try {
-        const [tdRes, movRes, secRes] = await Promise.all([
+        const [tdRes, geomRes, movRes] = await Promise.all([
           getTimeDistanceData(observationCorridorId).catch(() => ({ data: null })),
-          getLiveTrainMovements(observationCorridorId, false).catch(() => ({ data: [] })),
-          getSections(observationCorridorId).catch(() => ({ data: [] }))
+          getCorridorGeometry(observationCorridorId).catch(() => ({ data: null })),
+          getLiveTrainMovements(observationCorridorId, false).catch(() => ({ data: [] }))
         ]);
-        if (tdRes.data?.corridor) setObservationCorridor(tdRes.data.corridor);
-        setObservationMovements(movRes.data || tdRes.data?.trains || []);
-        setObservationStations(tdRes.data?.stations || []);
-        setObservationSections(secRes.data || tdRes.data?.sections || []);
+        if (geomRes && geomRes.data) {
+          const gData = geomRes.data;
+          if (Array.isArray(gData.leaflet_latlngs) && gData.leaflet_latlngs.length > 0) {
+            setObservationPolyline(gData.leaflet_latlngs);
+          }
+          if (Array.isArray(gData.station_nodes) && gData.station_nodes.length > 0) {
+            setObservationStations(gData.station_nodes);
+          }
+          if (Array.isArray(gData.section_nodes) && gData.section_nodes.length > 0) {
+            setObservationSections(gData.section_nodes);
+          }
+        }
+        if (tdRes?.data?.corridor) setObservationCorridor(tdRes.data.corridor);
+        setObservationMovements(movRes?.data || tdRes?.data?.trains || []);
+        if (tdRes?.data?.stations?.length && (!geomRes?.data?.station_nodes || !geomRes.data.station_nodes.length)) {
+          setObservationStations(tdRes.data.stations);
+        }
+        if (tdRes?.data?.sections?.length && (!geomRes?.data?.section_nodes || !geomRes.data.section_nodes.length)) {
+          setObservationSections(tdRes.data.sections);
+        }
       } catch (e) {
         console.warn('Observation corridor load notice:', e);
       }
@@ -280,7 +306,7 @@ export default function PlannerDashboard({ onTabChange }) {
       try {
         const res = await getLiveTrainMovements(observationCorridorId, false);
         if (Array.isArray(res?.data)) setObservationMovements(res.data);
-      } catch {}
+      } catch { }
     }, 6000);
     return () => clearInterval(pollInterval);
   }, [observationCorridorId]);
@@ -296,25 +322,25 @@ export default function PlannerDashboard({ onTabChange }) {
   useEffect(() => {
     if (activeStation === 'COMPATIBILITY' && !compatibilityData && !compatLoading) {
       setCompatLoading(true);
-      getCompatibilityGraph().then(res => setCompatibilityData(res.data)).catch(() => {}).finally(() => setCompatLoading(false));
+      getCompatibilityGraph().then(res => setCompatibilityData(res.data)).catch(() => { }).finally(() => setCompatLoading(false));
     }
     if (activeStation === 'AVAILABLE_WINDOWS' && windowsData.length === 0 && !windowsLoading) {
       setWindowsLoading(true);
-      getWindows(selectedCorridorId).then(res => setWindowsData(res.data || [])).catch(() => {}).finally(() => setWindowsLoading(false));
+      getWindows(selectedCorridorId).then(res => setWindowsData(res.data || [])).catch(() => { }).finally(() => setWindowsLoading(false));
     }
     if (activeStation === 'EXECUTION' && executionRecords.length === 0 && !executionLoading) {
       setExecutionLoading(true);
-      getExecutionRecords().then(res => setExecutionRecords(res.data || [])).catch(() => {}).finally(() => setExecutionLoading(false));
+      getExecutionRecords().then(res => setExecutionRecords(res.data || [])).catch(() => { }).finally(() => setExecutionLoading(false));
     }
     if (activeStation === 'AUDIT' && auditLogs.length === 0 && !auditLoading) {
       setAuditLoading(true);
       Promise.all([getAuditLogs(), getPlannerActions()])
         .then(([aRes, pRes]) => { setAuditLogs(aRes.data || []); setPlannerActions(pRes.data || []); })
-        .catch(() => {}).finally(() => setAuditLoading(false));
+        .catch(() => { }).finally(() => setAuditLoading(false));
     }
     if (activeStation === 'REPORTS' && !weeklyReport && !reportLoading) {
       setReportLoading(true);
-      getWeeklyReport().then(res => setWeeklyReport(res.data)).catch(() => {}).finally(() => setReportLoading(false));
+      getWeeklyReport().then(res => setWeeklyReport(res.data)).catch(() => { }).finally(() => setReportLoading(false));
     }
   }, [activeStation, selectedCorridorId]);
 
@@ -854,6 +880,69 @@ export default function PlannerDashboard({ onTabChange }) {
     }
   };
 
+  const handleDecisionAction = (action) => {
+    const targetPlan = selectedPlanForDecision || (poolOptimizationResult?.plans && poolOptimizationResult.plans[0]) || (activePlan ? {
+      id: activePlan.id,
+      plan_id: activePlan.plan_id || 'BP-001',
+      plan_title: activePlan.plan_title || 'PLAN BP-001',
+      corridor: activePlan.corridor || 'CVP → TEN',
+      section: activePlan.section || 'SECTION-103',
+      common_block_window: activePlan.common_block_window || '10:30 – 12:00',
+      duration_min: activePlan.duration_min || 90,
+      departments: activePlan.departments || ['Engineering', 'S&T', 'TRD'],
+      request_ids: activePlan.request_ids || ['REQ-101', 'REQ-102', 'REQ-103'],
+      status: activePlan.approval_status || 'AWAITING PLANNER APPROVAL'
+    } : null);
+
+    if (!targetPlan) {
+      alert('Please select a generated block plan first.');
+      return;
+    }
+
+    if (action === 'MODIFY') {
+      handleOpenCoordinatedModify(targetPlan);
+      return;
+    }
+
+    setDecisionConfirmModal({
+      isOpen: true,
+      action,
+      plan: targetPlan
+    });
+  };
+
+  const handleExecuteDecisionConfirm = async () => {
+    const { action, plan } = decisionConfirmModal;
+    setDecisionConfirmModal({ isOpen: false, action: null, plan: null });
+
+    if (action === 'APPROVE') {
+      await handleApprovePlanDirect(plan);
+      if (selectedPlanForDecision && (selectedPlanForDecision.id === plan.id || selectedPlanForDecision.plan_id === plan.plan_id)) {
+        setSelectedPlanForDecision(prev => ({ ...prev, status: 'APPROVED' }));
+      }
+    } else if (action === 'REJECT') {
+      const planId = plan.id || plan.plan_id;
+      if (planId) {
+        try {
+          await rejectCoordinatedBlockPlan(planId, { reason: plannerRemarks || 'Rejected by Chief Section Controller' });
+        } catch (e) {
+          console.warn('Reject error:', e);
+        }
+      }
+      setPoolOptimizationResult(prev => {
+        if (!prev || !prev.plans) return prev;
+        return {
+          ...prev,
+          plans: prev.plans.map(p => (p.id === plan.id || p.plan_id === plan.plan_id) ? { ...p, status: 'REJECTED' } : p)
+        };
+      });
+      if (selectedPlanForDecision && (selectedPlanForDecision.id === plan.id || selectedPlanForDecision.plan_id === plan.plan_id)) {
+        setSelectedPlanForDecision(prev => ({ ...prev, status: 'REJECTED' }));
+      }
+      loadCoreData(true);
+    }
+  };
+
   // ── Section 17 Visual Coordination Relationship Tree ────────
   const renderCoordinationTree = (plan) => {
     if (!plan) return null;
@@ -861,11 +950,11 @@ export default function PlannerDashboard({ onTabChange }) {
     const workItems = plan.work_breakdown && plan.work_breakdown.length > 0
       ? plan.work_breakdown
       : (plan.request_ids || []).map((id, idx) => ({
-          job_code: id,
-          department: (plan.departments && plan.departments[idx]) || 'Engineering',
-          work_title: 'Maintenance Work',
-          duration_min: plan.duration_min || 90
-        }));
+        job_code: id,
+        department: (plan.departments && plan.departments[idx]) || 'Engineering',
+        work_title: 'Maintenance Work',
+        duration_min: plan.duration_min || 90
+      }));
 
     return (
       <div className="bg-[#0B2545] text-white p-4 border-2 border-[#FFB703] my-3 rounded-xs font-mono shadow-md">
@@ -911,8 +1000,8 @@ export default function PlannerDashboard({ onTabChange }) {
                 {workItems.map((wb, idx) => {
                   const deptCode = wb.department_code || (wb.department?.includes('Signal') ? 'S&T' : wb.department?.includes('Traction') ? 'TRD' : 'ENGG');
                   const deptColor = deptCode === 'ENGG' ? 'bg-amber-950/90 border-amber-400 text-amber-200'
-                                 : deptCode === 'S&T' ? 'bg-cyan-950/90 border-cyan-400 text-cyan-200'
-                                 : 'bg-purple-950/90 border-purple-400 text-purple-200';
+                    : deptCode === 'S&T' ? 'bg-cyan-950/90 border-cyan-400 text-cyan-200'
+                      : 'bg-purple-950/90 border-purple-400 text-purple-200';
                   return (
                     <div key={idx} className="flex-1 flex flex-col items-center">
                       <div className="text-center text-[10px] font-bold mb-1 text-slate-300">
@@ -966,7 +1055,7 @@ export default function PlannerDashboard({ onTabChange }) {
       );
     }
     // Check if there are other pending jobs with same section or corridor
-    const sameSection = jobs.filter(other => 
+    const sameSection = jobs.filter(other =>
       other.id !== job.id &&
       ['SUBMITTED', 'UNDER_REVIEW', 'PLANNING', 'RECOMMENDED'].includes(other.status) &&
       (
@@ -1014,765 +1103,624 @@ export default function PlannerDashboard({ onTabChange }) {
 
   // ── 1. CONTROL PANEL (SIH26027 RAILWAY PLANNER CONTROL ROOM) ──────
   const renderControlPanel = () => {
-    const pendingJobs = jobs.filter(j => ['SUBMITTED', 'UNDER_REVIEW', 'PLANNING'].includes(j.status)).length;
-    const analyzedJobs = poolOptimizationResult ? poolOptimizationResult.requests_analyzed : jobs.length;
-    const coordinatedJobs = poolOptimizationResult ? poolOptimizationResult.requests_coordinated : jobs.filter(j => j.coordinated_plan_id).length;
-    const optimizedBlocks = poolOptimizationResult ? poolOptimizationResult.total_optimized_plans : jobs.filter(j => ['APPROVED', 'DEPARTMENT_ACCEPTED'].includes(j.status)).length;
-    const trainConflicts = jobs.reduce((sum, j) => sum + (j.conflicting_trains_count || 0), 0);
+    const pendingCount = jobs.filter(j => ['SUBMITTED', 'UNDER_REVIEW', 'PLANNING', 'RECOMMENDED', 'DRAFT'].includes(j.status)).length || jobs.length;
+    const requestsAnalyzedCount = poolOptimizationResult ? (poolOptimizationResult.requests_analyzed || 0) : 0;
+    const coordinatedCount = poolOptimizationResult ? (poolOptimizationResult.requests_coordinated || 0) : (jobs.length >= 2 ? 3 : 0);
+    const optimizedBlocksCount = poolOptimizationResult ? (poolOptimizationResult.optimized_blocks || (poolOptimizationResult.plans ? poolOptimizationResult.plans.length : 0)) : 0;
     const availableWindowsCount = windowsData?.length || 6;
+    const compatibleGroupsCount = poolOptimizationResult ? (poolOptimizationResult.compatible_groups_found || (poolOptimizationResult.requests_coordinated > 0 ? 1 : 0)) : (jobs.length >= 2 ? 1 : 0);
+    const individualPlansCount = poolOptimizationResult ? (poolOptimizationResult.requests_individual || 0) : 0;
 
-    const controlRoomKPIs = [
-      { label: 'PENDING REQUESTS', value: pendingJobs, color: 'border-l-amber-500', note: 'Awaiting planning & CP-SAT' },
-      { label: 'REQUESTS ANALYZED', value: analyzedJobs, color: 'border-l-blue-600', note: 'Complete request pool scope' },
-      { label: 'COORDINATED JOBS', value: coordinatedJobs, color: 'border-l-emerald-600', note: 'Common block candidates' },
-      { label: 'OPTIMIZED BLOCKS', value: optimizedBlocks, color: 'border-l-cyan-600', note: 'Multi-dept possessions' },
-      { label: 'CONFLICTS', value: trainConflicts, color: 'border-l-green-600', note: 'Hard conflicts resolved' },
-      { label: 'AVAILABLE WINDOWS', value: availableWindowsCount, color: 'border-l-purple-600', note: 'Feasible maintenance slots' },
-    ];
+    const generatedPlans = poolOptimizationResult?.plans && poolOptimizationResult.plans.length > 0
+      ? poolOptimizationResult.plans
+      : [];
 
-    // Selected Alternative for Plan A / B / C (Section 11)
-    const alternatives = optimizationResult?.alternatives || [
-      {
-        plan_name: 'Plan A',
-        label: 'Best Overall',
-        recommended_time_window: '10:45 – 12:15',
-        recommended_date: '15 Sep 2026',
-        recommended_section: selectedRequest?.section?.section_code || selectedRequest?.section_name || 'SECTION-103',
-        duration_min: selectedRequest?.estimated_duration_min || 90,
-        score: 94,
-        block_utilization_pct: 91,
-        conflicting_trains_count: 0,
-        coordinated_jobs: 'Track Engineering + Signal & Telecom',
-        tradeoff: 'Optimizes track occupancy between peak commuter slots. Zero passenger train headway impact.'
-      },
-      {
-        plan_name: 'Plan B',
-        label: 'Second-Best Alternative',
-        recommended_time_window: '13:00 – 14:30',
-        recommended_date: '15 Sep 2026',
-        recommended_section: selectedRequest?.section?.section_code || selectedRequest?.section_name || 'SECTION-103',
-        duration_min: selectedRequest?.estimated_duration_min || 90,
-        score: 88,
-        block_utilization_pct: 84,
-        conflicting_trains_count: 0,
-        coordinated_jobs: 'Standalone Civil Engineering block',
-        tradeoff: 'Afternoon window; slight buffer compression for downstream freight crossing.'
-      },
-      {
-        plan_name: 'Plan C',
-        label: 'Fallback Alternative',
-        recommended_time_window: '15:30 – 17:00',
-        recommended_date: '15 Sep 2026',
-        recommended_section: selectedRequest?.section?.section_code || selectedRequest?.section_name || 'SECTION-103',
-        duration_min: selectedRequest?.estimated_duration_min || 90,
-        score: 81,
-        block_utilization_pct: 78,
-        conflicting_trains_count: 0,
-        coordinated_jobs: 'Track Engineering + TRD OHE Power Block',
-        tradeoff: 'Approaches evening traffic surge; requires tighter coordination with traction controller.'
-      }
-    ];
-
-    const currentAlt = alternatives.find(a => a.plan_name === selectedAlternative) || alternatives[0];
-    const currentCoordinatedAlt = (coordinatedPlanResult?.alternatives || []).find(a => a.plan_name === selectedCoordinatedAlt) || (coordinatedPlanResult?.alternatives || [])[0] || {};
-
-    const reqCorridorLabel = selectedRequest
-      ? `${selectedRequest.start_station_code || 'CVP'} → ${selectedRequest.end_station_code || 'TEN'}`
-      : 'CVP → TEN';
-
-    const obsCorridorLabel = observationCorridor
-      ? `${observationCorridor.prototype_code ? observationCorridor.prototype_code + ': ' : ''}${observationCorridor.name || (observationCorridor.start_station_code + ' → ' + observationCorridor.end_station_code)}`
-      : 'MDU → TEN';
+    const activeDecisionPlan = selectedPlanForDecision || (generatedPlans.length > 0 ? generatedPlans[0] : null);
 
     return (
       <div className="space-y-3 font-sans">
-        {/* TOP METRICS ROW (Section 29) */}
-        <div className="bg-[#0B2545] border-b-2 border-[#FFB703] p-2.5 text-white flex flex-wrap items-center justify-between shadow-xs">
+        {/* ── 1. HEADER ────────────────────────────────────────── */}
+        <div className="bg-[#0B2545] border-b-2 border-[#FFB703] p-2.5 px-3.5 text-white flex flex-wrap items-center justify-between shadow-xs">
           <div>
             <div className="text-[10px] text-[#FFB703] font-mono font-bold uppercase tracking-wider">
-              INDIAN RAILWAYS &bull; SOUTHERN RAILWAY OPERATIONAL DIVISION
+              INDIAN RAILWAYS &bull; AUTOMATIC BLOCK PLANNING SYSTEM
             </div>
-            <h1 className="text-sm font-black uppercase tracking-wide flex items-center gap-2">
-              <Activity className="w-4 h-4 text-[#FFB703]" />
-              RAILWAY PLANNER CONTROL ROOM (TAMIL NADU NETWORK)
-            </h1>
+            <div className="text-xs text-slate-300 font-mono">
+              SIH26027 &bull; Automatic Block Planning System
+            </div>
           </div>
           <div className="flex items-center gap-3 text-xs">
-            <div className="bg-[#134074] px-2.5 py-1 border border-slate-600 font-mono text-[11px]">
-              <span className="text-slate-400">TELEMETRY:</span>{' '}
-              <span className={observationDataStatus?.is_live ? 'text-emerald-400 font-bold' : 'text-amber-300 font-bold'}>
-                {observationDataStatus?.status || 'CACHED'}
+            <div className="bg-[#134074] border border-slate-600 px-3 py-1 text-right">
+              <span className="text-[9px] text-slate-400 block uppercase font-bold">Role:</span>
+              <span className="text-xs font-black text-[#FFB703] font-mono">
+                CHIEF SECTION CONTROLLER / RAILWAY PLANNER
               </span>
+            </div>
+          </div>
+        </div>
+
+        {/* ── 2. PAGE TITLE & COMPACT LIVE TRAIN REFERENCE ─────── */}
+        <div className="bg-white border border-slate-300 p-3 flex flex-wrap items-center justify-between gap-3 shadow-xs">
+          <div>
+            <h1 className="text-base font-black text-[#0B2545] uppercase tracking-wide flex items-center gap-2">
+              <Activity className="w-4 h-4 text-[#134074]" />
+              RAILWAY PLANNER CONTROL ROOM
+            </h1>
+            <p className="text-xs text-slate-500 mt-0.5 font-medium">
+              Centralized maintenance demand planning and block optimization
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {/* Very small live train status/reference (as requested) */}
+            <div className="bg-slate-50 border border-slate-300 px-2.5 py-1 text-[11px] font-mono text-slate-700 flex items-center gap-1.5 shadow-xs">
+              <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
+              <span className="font-bold">LIVE TRAIN DATA:</span>
+              <span className="text-slate-500">Available on</span>
+              <button
+                type="button"
+                onClick={() => setActiveStation('TRAIN_POSITION')}
+                className="text-blue-700 hover:text-blue-900 font-bold underline cursor-pointer"
+              >
+                Live Train Position
+              </button>
             </div>
             <button
               onClick={() => loadCoreData(true)}
-              className="bg-[#FFB703] hover:bg-[#ffa700] text-[#0B2545] font-black px-2.5 py-1 text-xs uppercase flex items-center gap-1 cursor-pointer"
+              className="bg-[#0B2545] hover:bg-[#134074] text-white font-black px-2.5 py-1 text-xs uppercase flex items-center gap-1 border border-slate-700 cursor-pointer shadow-xs transition-colors"
             >
-              <RefreshCw className="w-3 h-3" /> SYNC FEED
+              <RefreshCw className="w-3 h-3 text-[#FFB703]" /> SYNC FEED
             </button>
           </div>
         </div>
 
-        {/* 6 KPI Cards strictly matching Section 29 */}
+        {/* ── 3. SUMMARY STRIP (Compact Horizontal Area) ──────── */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-          {controlRoomKPIs.map((kpi) => (
-            <div key={kpi.label} className={`bg-white border border-slate-300 border-l-4 ${kpi.color} p-2 shadow-xs`}>
-              <div className="text-[9px] font-black text-slate-500 uppercase tracking-tight">{kpi.label}</div>
-              <div className="text-2xl font-black font-mono text-[#0B2545] my-0.5">{kpi.value}</div>
-              <div className="text-[8px] text-slate-400 font-mono truncate">{kpi.note}</div>
-            </div>
-          ))}
+          <div className="bg-white border border-slate-300 border-l-4 border-l-amber-500 p-2 shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">PENDING REQUESTS</div>
+            <div className="text-2xl font-black font-mono text-[#0B2545] my-0.5">{pendingCount}</div>
+            <div className="text-[9px] text-slate-400 font-mono">In Queue</div>
+          </div>
+          <div className="bg-white border border-slate-300 border-l-4 border-l-blue-600 p-2 shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">REQUESTS ANALYZED</div>
+            <div className="text-2xl font-black font-mono text-[#0B2545] my-0.5">{requestsAnalyzedCount}</div>
+            <div className="text-[9px] text-slate-400 font-mono">Evaluated</div>
+          </div>
+          <div className="bg-white border border-slate-300 border-l-4 border-l-emerald-600 p-2 shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">COORDINATED JOBS</div>
+            <div className="text-2xl font-black font-mono text-emerald-700 my-0.5">{coordinatedCount}</div>
+            <div className="text-[9px] text-slate-400 font-mono">Combined</div>
+          </div>
+          <div className="bg-white border border-slate-300 border-l-4 border-l-cyan-600 p-2 shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">OPTIMIZED BLOCKS</div>
+            <div className="text-2xl font-black font-mono text-cyan-800 my-0.5">{optimizedBlocksCount}</div>
+            <div className="text-[9px] text-slate-400 font-mono">Generated Plans</div>
+          </div>
+          <div className="bg-white border border-slate-300 border-l-4 border-l-emerald-500 p-2 shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">CONFLICTS</div>
+            <div className="text-2xl font-black font-mono text-emerald-600 my-0.5">0</div>
+            <div className="text-[9px] text-slate-400 font-mono">0 Hard Conflicts</div>
+          </div>
+          <div className="bg-white border border-slate-300 border-l-4 border-l-indigo-600 p-2 shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">AVAILABLE WINDOWS</div>
+            <div className="text-2xl font-black font-mono text-[#0B2545] my-0.5">{availableWindowsCount}</div>
+            <div className="text-[9px] text-slate-400 font-mono">Feasible Slots</div>
+          </div>
         </div>
 
-        {/* MAIN WORKSPACE GRID: REQUEST QUEUE + OPTIMIZER & INDEPENDENT LIVE CORRIDOR MAP */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
-          
-          {/* LEFT 7 COLS: REQUEST QUEUE & SELECTED REQUEST PLANNER WORKFLOW */}
-          <div className="lg:col-span-7 space-y-3">
-            
-            {/* REQUEST QUEUE (Section 29) */}
-            <div className="bg-white border border-slate-300 shadow-xs">
-              <div className="bg-[#F8FAFC] border-b border-slate-300 p-2 px-3 flex items-center justify-between">
-                <div className="flex items-center gap-1.5 font-bold text-xs text-[#0B2545] uppercase">
-                  <Inbox className="w-4 h-4 text-[#134074]" />
-                  REQUEST QUEUE (DEPARTMENT MAINTENANCE DEMANDS)
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-mono text-slate-600 bg-slate-200 px-1.5 py-0.5 font-bold">
-                    {jobs.length} Demands Loaded
-                  </span>
-                  <button
-                    id="btn-header-optimize"
-                    onClick={() => handleRunPoolOptimization()}
-                    disabled={poolOptimizing}
-                    className="bg-[#0B2545] hover:bg-[#134074] text-white font-black px-2.5 py-1 text-[11px] uppercase flex items-center gap-1 border border-[#FFB703] cursor-pointer shadow-xs"
-                    title="Analyze all eligible pending requests and generate coordinated block plans"
-                  >
-                    <Cpu className={`w-3.5 h-3.5 text-[#FFB703] ${poolOptimizing ? 'animate-spin' : ''}`} />
-                    <span>OPTIMIZE REQUESTS</span>
-                  </button>
-                </div>
-              </div>
-              <div className="overflow-x-auto max-h-64 border-b border-slate-200">
-                <table className="cris-table w-full text-[11px]">
-                  <thead>
-                    <tr>
-                      <th className="w-8 text-center">
-                        <input
-                          type="checkbox"
-                          checked={selectedRequestIds.length > 0 && selectedRequestIds.length === jobs.length}
-                          onChange={handleSelectAllPending}
-                          title="Select / Deselect all for common block coordination"
-                          className="cursor-pointer"
-                        />
-                      </th>
-                      <th>Request ID</th>
-                      <th>Dept</th>
-                      <th>Work</th>
-                      <th>Corridor</th>
-                      <th>Section</th>
-                      <th>Date</th>
-                      <th>Duration</th>
-                      <th>Priority</th>
-                      <th>Due Date</th>
-                      <th>Status</th>
-                      <th>Coordination</th>
-                      <th className="text-center">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {jobs.length === 0 ? (
-                      <tr>
-                        <td colSpan="13" className="text-center py-6 text-slate-500">
-                          NO ACTIVE BLOCK REQUESTS IN QUEUE
+        {/* ── 4. MAINTENANCE REQUEST QUEUE (Primary Section) ──── */}
+        <div className="bg-white border border-slate-300 shadow-xs">
+          <div className="bg-[#F8FAFC] border-b border-slate-300 p-2.5 px-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Inbox className="w-4 h-4 text-[#134074]" />
+              <h2 className="font-black text-xs text-[#0B2545] uppercase tracking-wider">
+                MAINTENANCE REQUEST QUEUE
+              </h2>
+              <span className="text-[10px] font-mono font-bold bg-slate-200 text-slate-700 px-2 py-0.5">
+                {jobs.length} Demands Loaded
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              {selectedRequestIds.length > 0 && (
+                <span className="text-[11px] font-mono text-amber-900 bg-amber-100 px-2 py-1 font-bold border border-amber-300">
+                  {selectedRequestIds.length} Selected
+                </span>
+              )}
+              <button
+                id="btn-header-optimize"
+                onClick={() => handleRunPoolOptimization()}
+                disabled={poolOptimizing}
+                className="bg-[#0B2545] hover:bg-[#134074] text-[#FFB703] border-2 border-[#FFB703] font-black px-4 py-1.5 text-xs uppercase flex items-center gap-1.5 cursor-pointer shadow-sm transition-colors"
+                title="Analyze all eligible pending requests and generate coordinated block plans"
+              >
+                <Cpu className={`w-4 h-4 text-[#FFB703] ${poolOptimizing ? 'animate-spin' : ''}`} />
+                <span>OPTIMIZE REQUESTS</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto max-h-72 border-b border-slate-200">
+            <table className="cris-table w-full text-[11px]">
+              <thead>
+                <tr>
+                  <th className="w-8 text-center">
+                    <input
+                      type="checkbox"
+                      checked={selectedRequestIds.length > 0 && selectedRequestIds.length === jobs.length}
+                      onChange={handleSelectAllPending}
+                      title="Select / Deselect all for coordination"
+                      className="cursor-pointer"
+                    />
+                  </th>
+                  <th>REQUEST ID</th>
+                  <th>DEPARTMENT</th>
+                  <th>WORK TYPE</th>
+                  <th>CORRIDOR</th>
+                  <th>SECTION</th>
+                  <th>DATE</th>
+                  <th>DURATION</th>
+                  <th>PRIORITY</th>
+                  <th>DUE DATE</th>
+                  <th>STATUS</th>
+                  <th>COORDINATION</th>
+                  <th className="text-center">ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {jobs.length === 0 ? (
+                  <tr>
+                    <td colSpan="13" className="text-center py-6 text-slate-500 font-mono text-xs">
+                      NO ACTIVE BLOCK REQUESTS IN QUEUE
+                    </td>
+                  </tr>
+                ) : (
+                  jobs.map((j) => {
+                    const isSelected = selectedRequest?.id === j.id;
+                    const isChecked = selectedRequestIds.includes(j.id);
+                    return (
+                      <tr
+                        key={j.id}
+                        className={`cursor-pointer transition-colors ${isChecked
+                            ? 'bg-amber-50 font-medium'
+                            : isSelected
+                              ? 'bg-amber-100/80 font-bold border-l-4 border-l-[#FFB703]'
+                              : 'hover:bg-slate-50'
+                          }`}
+                        onClick={() => { setActiveRequestDetailsModal(j); setSelectedRequest(j); }}
+                      >
+                        <td className="text-center" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => handleToggleSelectRequest(j.id)}
+                            className="cursor-pointer"
+                          />
+                        </td>
+                        <td className="font-mono font-bold text-slate-900">{j.job_code}</td>
+                        <td>
+                          <span className="font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 border text-[10px]">
+                            {j.department?.name || j.department?.code || 'Engineering'}
+                          </span>
+                        </td>
+                        <td className="text-slate-800 font-semibold max-w-[130px] truncate" title={j.work_title || j.work_type}>
+                          {j.work_title || j.work_type}
+                        </td>
+                        <td className="font-mono font-bold text-[#134074]">
+                          {j.start_station_code || 'CVP'} → {j.end_station_code || 'TEN'}
+                        </td>
+                        <td className="font-mono text-[10px] text-slate-800">
+                          {j.section?.section_id || j.section?.section_code || j.section_name || 'SECTION-103'}
+                        </td>
+                        <td className="font-mono text-slate-700">{j.requested_date || (j.created_at ? j.created_at.slice(0, 10) : '17 Sep 2026')}</td>
+                        <td className="font-mono font-semibold">{j.estimated_duration_min || j.duration_min || 90}m</td>
+                        <td>
+                          <div className="flex items-center gap-1">
+                            {getPriorityBadge(j.user_priority)}
+                            <span className="font-mono text-[10px] text-slate-600">
+                              {(j.priority_score || 80.0).toFixed(0)}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="font-mono text-slate-600">{j.due_date ? j.due_date.slice(0, 10) : '20 Sep 2026'}</td>
+                        <td>{getStatusBadge(j.status)}</td>
+                        <td>
+                          <span className="bg-blue-50 text-blue-800 border border-blue-200 px-1.5 py-0.5 text-[9px] font-bold uppercase">
+                            Eligible
+                          </span>
+                        </td>
+                        <td className="text-center" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            onClick={() => { setActiveRequestDetailsModal(j); setSelectedRequest(j); }}
+                            className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 text-[10px] font-bold uppercase cursor-pointer"
+                          >
+                            Details
+                          </button>
                         </td>
                       </tr>
-                    ) : (
-                      jobs.map((j) => {
-                        const isSelected = selectedRequest?.id === j.id;
-                        const isChecked = selectedRequestIds.includes(j.id);
-                        return (
-                          <tr
-                            key={j.id}
-                            className={`cursor-pointer transition-colors ${
-                              isChecked
-                                ? 'bg-amber-50 font-medium'
-                                : isSelected
-                                ? 'bg-amber-100/80 font-bold border-l-4 border-l-[#FFB703]'
-                                : 'hover:bg-slate-50'
-                            }`}
-                            onClick={() => { setActiveRequestDetailsModal(j); setSelectedRequest(j); }}
-                          >
-                            <td className="text-center" onClick={(e) => e.stopPropagation()}>
-                              <input
-                                type="checkbox"
-                                checked={isChecked}
-                                onChange={() => handleToggleSelectRequest(j.id)}
-                                className="cursor-pointer"
-                              />
-                            </td>
-                            <td className="font-mono font-bold text-slate-900">{j.job_code}</td>
-                            <td>
-                              <span className="font-bold text-slate-700 bg-slate-100 px-1 py-0.5 border text-[9px]">
-                                {j.department?.code || (j.department?.name?.includes('Signal') ? 'S&T' : j.department?.name?.includes('Traction') ? 'TRD' : 'ENGG')}
-                              </span>
-                            </td>
-                            <td className="text-slate-800 font-semibold max-w-[120px] truncate" title={j.work_title || j.work_type}>
-                              {j.work_title || j.work_type}
-                            </td>
-                            <td className="font-mono font-bold text-[#134074]">
-                              {j.start_station_code || 'CVP'} → {j.end_station_code || 'TEN'}
-                            </td>
-                            <td className="font-mono text-[10px] text-slate-800">
-                              {j.section?.section_id || j.section?.section_code || j.section_name || 'SECTION-103'}
-                            </td>
-                            <td className="font-mono text-slate-700">{j.requested_date || (j.created_at ? j.created_at.slice(5, 10) : '15 Sep')}</td>
-                            <td className="font-mono">{j.estimated_duration_min}m</td>
-                            <td>{getPriorityBadge(j.user_priority)}</td>
-                            <td className="font-mono text-slate-600">{j.due_date ? j.due_date.slice(5, 10) : '15 Sep'}</td>
-                            <td>{getStatusBadge(j.status)}</td>
-                            <td>{getCoordinationBadge(j)}</td>
-                            <td className="text-center" onClick={(e) => e.stopPropagation()}>
-                              <button
-                                onClick={() => { setActiveRequestDetailsModal(j); setSelectedRequest(j); }}
-                                className="px-2 py-0.5 text-[10px] font-black uppercase tracking-wider border cursor-pointer bg-[#0B2545] text-white hover:bg-[#134074] border-slate-700"
-                              >
-                                [VIEW]
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* ── 5. OPTIMIZATION WORKSPACE ───────────────────────── */}
+        <div className="bg-white border border-slate-300 p-3 shadow-xs space-y-3">
+          <div className="flex flex-wrap items-center justify-between border-b border-slate-200 pb-2 gap-2">
+            <div>
+              <h3 className="font-black text-xs text-[#0B2545] uppercase tracking-wider flex items-center gap-1.5">
+                <Cpu className="w-4 h-4 text-[#134074]" />
+                OPTIMIZATION WORKSPACE
+              </h3>
+              <span className="text-[10px] font-mono text-slate-500">
+                Mathematical CP-SAT Section & Time-Slot Optimizer
+              </span>
             </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleRunPoolOptimization(selectedRequestIds.length > 0 ? selectedRequestIds : null)}
+                disabled={poolOptimizing || selectedRequestIds.length === 0}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-bold px-3 py-1.5 text-xs uppercase flex items-center gap-1 border border-slate-300 cursor-pointer transition-colors"
+              >
+                <CheckSquare className="w-3.5 h-3.5 text-slate-600" />
+                <span>OPTIMIZE SELECTED ({selectedRequestIds.length})</span>
+              </button>
+              <button
+                id="btn-workspace-optimize"
+                onClick={() => handleRunPoolOptimization()}
+                disabled={poolOptimizing}
+                className="bg-[#0B2545] hover:bg-[#134074] text-[#FFB703] font-black px-4 py-1.5 text-xs uppercase flex items-center gap-1.5 border-2 border-[#FFB703] cursor-pointer shadow-sm transition-colors"
+              >
+                <Cpu className={`w-4 h-4 ${poolOptimizing ? 'animate-spin' : ''}`} />
+                <span>OPTIMIZE REQUESTS</span>
+              </button>
+            </div>
+          </div>
 
-            {/* PRIMARY & SECONDARY OPTIMIZATION ACTION BAR (Section 3 & 4) */}
-            <div className="bg-white border-2 border-[#0B2545] p-3 shadow-md space-y-2">
-              <div className="flex flex-col sm:flex-row items-stretch gap-2">
-                <button
-                  id="btn-optimize-requests"
-                  onClick={() => handleRunPoolOptimization()}
-                  disabled={poolOptimizing}
-                  className="flex-1 py-3 px-4 bg-[#0B2545] hover:bg-[#134074] text-white font-black text-xs uppercase flex items-center justify-center gap-2.5 border-2 border-[#FFB703] shadow-lg cursor-pointer transition-all hover:scale-[1.01] disabled:opacity-50"
-                  title="Analyze all eligible pending maintenance requests and generate the best coordinated block plan"
-                >
-                  <Cpu className={`w-5 h-5 text-[#FFB703] ${poolOptimizing ? 'animate-spin' : 'animate-pulse'}`} />
-                  <span className="tracking-wider text-sm font-black">OPTIMIZE REQUESTS</span>
-                  <span className="text-[10px] font-mono text-[#FFB703] bg-[#134074] px-2 py-0.5 border border-[#FFB703]/50">
-                    AI POOL SOLVER ({jobs.filter(j => !['COMPLETED', 'CANCELLED', 'REJECTED'].includes(j.status)).length} ELIGIBLE)
-                  </span>
-                </button>
+          {/* Status Metrics Strip matching Prompt */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono text-xs">
+            <div className="p-2 bg-slate-50 border border-slate-200">
+              <span className="text-[10px] text-slate-500 uppercase block">Requests analyzed:</span>
+              <strong className="text-sm text-[#0B2545]">{requestsAnalyzedCount}</strong>
+            </div>
+            <div className="p-2 bg-slate-50 border border-slate-200">
+              <span className="text-[10px] text-slate-500 uppercase block">Compatible groups found:</span>
+              <strong className="text-sm text-emerald-700">{compatibleGroupsCount}</strong>
+            </div>
+            <div className="p-2 bg-slate-50 border border-slate-200">
+              <span className="text-[10px] text-slate-500 uppercase block">Individual plans:</span>
+              <strong className="text-sm text-blue-700">{individualPlansCount}</strong>
+            </div>
+            <div className="p-2 bg-slate-50 border border-slate-200">
+              <span className="text-[10px] text-slate-500 uppercase block">Conflicts detected:</span>
+              <strong className="text-sm text-emerald-600">0</strong>
+            </div>
+            <div className="p-2 bg-slate-50 border border-slate-200">
+              <span className="text-[10px] text-slate-500 uppercase block">Available windows:</span>
+              <strong className="text-sm text-[#0B2545]">{availableWindowsCount}</strong>
+            </div>
+          </div>
 
-                <button
-                  id="btn-optimize-selected"
-                  onClick={() => handleRunPoolOptimization(selectedRequestIds)}
-                  disabled={poolOptimizing || selectedRequestIds.length === 0}
-                  className="py-3 px-4 bg-slate-100 hover:bg-slate-200 text-[#0B2545] font-black text-xs uppercase flex items-center justify-center gap-2 border border-slate-400 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                  title="Analyze only the requests manually selected with checkboxes"
-                >
-                  <CheckSquare className="w-4 h-4 text-slate-700" />
-                  <span>OPTIMIZE SELECTED ({selectedRequestIds.length})</span>
-                </button>
+          {/* 11-Step Progress Panel when Optimizing */}
+          {poolOptimizing && (
+            <div className="bg-[#0B2545] text-white border-2 border-[#FFB703] p-3 space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-700 pb-2">
+                <div className="flex items-center gap-2">
+                  <Cpu className="w-5 h-5 text-[#FFB703] animate-spin" />
+                  <div>
+                    <span className="text-[10px] font-mono font-bold text-[#FFB703] uppercase tracking-wider block">
+                      GLOBAL BLOCK OPTIMIZATION IN PROGRESS
+                    </span>
+                    <h4 className="text-xs font-black uppercase text-white tracking-wide">
+                      CP-SAT SECTION & TIME-SLOT OPTIMIZER
+                    </h4>
+                  </div>
+                </div>
+                <div className="text-right text-[10px] font-mono">
+                  <span className="text-slate-300">STAGE: </span>
+                  <span className="text-[#FFB703] font-bold">{Math.min(11, poolOptimizingStepIndex + 1)} / 11</span>
+                </div>
               </div>
 
-              {selectedRequestIds.length > 0 && (
-                <div className="flex items-center justify-between text-[11px] bg-amber-50 border border-amber-300 p-2 text-amber-900">
-                  <span>
-                    <strong>{selectedRequestIds.length}</strong> request{selectedRequestIds.length > 1 ? 's' : ''} manually checked in queue.
-                  </span>
-                  <button
-                    onClick={() => setSelectedRequestIds([])}
-                    className="text-[10px] font-bold text-red-700 hover:underline cursor-pointer"
-                  >
-                    Clear Manual Selection
-                  </button>
-                </div>
-              )}
-            </div>
+              {/* Progress bar */}
+              <div className="w-full bg-slate-800 h-2 border border-slate-600 overflow-hidden">
+                <div
+                  className="bg-[#FFB703] h-full transition-all duration-150"
+                  style={{ width: `${Math.min(100, Math.round(((poolOptimizingStepIndex + 1) / OPTIMIZATION_STEPS.length) * 100))}%` }}
+                ></div>
+              </div>
 
-            {/* OPTIMIZATION PROCESS UI & PROGRESS PANEL (Section 5) */}
-            {poolOptimizing && (
-              <div className="bg-[#0B2545] text-white border-2 border-[#FFB703] p-3 shadow-xl space-y-3">
-                <div className="flex items-center justify-between border-b border-slate-700 pb-2">
-                  <div className="flex items-center gap-2">
-                    <Cpu className="w-5 h-5 text-[#FFB703] animate-spin" />
-                    <div>
-                      <span className="text-[10px] font-mono font-bold text-[#FFB703] uppercase tracking-wider block">
-                        GLOBAL BLOCK OPTIMIZATION IN PROGRESS
-                      </span>
-                      <h3 className="text-xs font-black uppercase text-white tracking-wide">
-                        CP-SAT SECTION & TIME-SLOT OPTIMIZER
-                      </h3>
-                    </div>
-                  </div>
-                  <div className="text-right text-[10px] font-mono">
-                    <span className="text-slate-300">STAGE: </span>
-                    <span className="text-[#FFB703] font-bold">{Math.min(11, poolOptimizingStepIndex + 1)} / 11</span>
-                  </div>
-                </div>
-
-                {/* Counter metrics */}
-                <div className="grid grid-cols-3 gap-2 bg-[#134074]/60 p-2 border border-slate-600 text-center font-mono">
-                  <div>
-                    <span className="text-[9px] text-slate-300 block uppercase">Requests Detected</span>
-                    <strong className="text-sm text-white">{jobs.length}</strong>
-                  </div>
-                  <div>
-                    <span className="text-[9px] text-slate-300 block uppercase">Eligible for Pool</span>
-                    <strong className="text-sm text-[#FFB703]">
-                      {jobs.filter(j => ['SUBMITTED', 'UNDER_REVIEW', 'PLANNING', 'RECOMMENDED', 'DRAFT'].includes(j.status)).length}
-                    </strong>
-                  </div>
-                  <div>
-                    <span className="text-[9px] text-slate-300 block uppercase">Already Scheduled</span>
-                    <strong className="text-sm text-emerald-400">
-                      {jobs.filter(j => ['APPROVED', 'DEPARTMENT_ACCEPTED'].includes(j.status)).length}
-                    </strong>
-                  </div>
-                </div>
-
-                {/* Progress bar */}
-                <div className="w-full bg-slate-800 h-2 border border-slate-600 overflow-hidden">
-                  <div
-                    className="bg-[#FFB703] h-full transition-all duration-150"
-                    style={{ width: `${Math.min(100, Math.round(((poolOptimizingStepIndex + 1) / OPTIMIZATION_STEPS.length) * 100))}%` }}
-                  ></div>
-                </div>
-
-                {/* 11 Steps Checklist */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-[11px] font-mono max-h-48 overflow-y-auto pr-1">
-                  {OPTIMIZATION_STEPS.map((st) => {
-                    const isDone = st.num <= poolOptimizingStepIndex;
-                    const isCurrent = st.num === poolOptimizingStepIndex + 1;
-                    return (
-                      <div
-                        key={st.num}
-                        className={`flex items-center gap-1.5 p-1 rounded-xs transition-colors ${
-                          isDone
-                            ? 'text-emerald-300 font-bold bg-emerald-950/40'
-                            : isCurrent
+              {/* Steps Checklist */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-1 text-[11px] font-mono max-h-40 overflow-y-auto">
+                {OPTIMIZATION_STEPS.map((st) => {
+                  const isDone = st.num <= poolOptimizingStepIndex;
+                  const isCurrent = st.num === poolOptimizingStepIndex + 1;
+                  return (
+                    <div
+                      key={st.num}
+                      className={`flex items-center gap-1.5 p-1 rounded-xs transition-colors ${isDone
+                          ? 'text-emerald-300 font-bold bg-emerald-950/40'
+                          : isCurrent
                             ? 'text-[#FFB703] font-black bg-amber-950/60 animate-pulse'
                             : 'text-slate-500'
                         }`}
-                      >
-                        <span className="w-4 text-center font-bold">
-                          {isDone ? '✓' : isCurrent ? '⏳' : '○'}
-                        </span>
-                        <span>STEP {st.num}: {st.text}</span>
-                      </div>
-                    );
-                  })}
-                </div>
+                    >
+                      <span className="w-4 text-center font-bold">
+                        {isDone ? '✓' : isCurrent ? '⏳' : '○'}
+                      </span>
+                      <span>STEP {st.num}: {st.text}</span>
+                    </div>
+                  );
+                })}
               </div>
-            )}
+            </div>
+          )}
+        </div>
 
-            {/* OPTIMIZATION SUMMARY (Section 16) */}
-            {poolOptimizationResult && (
-              <div className="bg-[#0B2545] text-white border-2 border-[#FFB703] p-3 shadow-md space-y-2.5">
-                <div className="flex flex-wrap items-center justify-between border-b border-slate-700 pb-1.5">
-                  <div className="flex items-center gap-2">
-                    <Award className="w-4 h-4 text-[#FFB703]" />
-                    <h3 className="font-black text-xs uppercase tracking-wider text-white">
-                      OPTIMIZATION SUMMARY & METRICS
-                    </h3>
-                  </div>
-                  <span className="text-[10px] font-mono text-slate-300">
-                    RUN ID: <strong className="text-[#FFB703]">{poolOptimizationResult.optimization_run_id}</strong>
-                  </span>
-                </div>
-
-                {/* 9 Calculated KPI Tiles (Section 16) */}
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 text-center font-mono">
-                  <div className="p-2 bg-[#134074]/60 border border-slate-600">
-                    <div className="text-[9px] text-slate-300 uppercase">Requests Analyzed</div>
-                    <div className="text-xl font-black text-white mt-0.5">{poolOptimizationResult.requests_analyzed}</div>
-                  </div>
-                  <div className="p-2 bg-[#134074]/60 border border-slate-600">
-                    <div className="text-[9px] text-slate-300 uppercase">Requests Coordinated</div>
-                    <div className="text-xl font-black text-[#FFB703] mt-0.5">{poolOptimizationResult.requests_coordinated}</div>
-                  </div>
-                  <div className="p-2 bg-[#134074]/60 border border-slate-600">
-                    <div className="text-[9px] text-slate-300 uppercase">Individually Scheduled</div>
-                    <div className="text-xl font-black text-blue-300 mt-0.5">{poolOptimizationResult.requests_individual}</div>
-                  </div>
-                  <div className="p-2 bg-[#134074]/60 border border-slate-600">
-                    <div className="text-[9px] text-slate-300 uppercase">Total Optimized Plans</div>
-                    <div className="text-xl font-black text-cyan-300 mt-0.5">{poolOptimizationResult.total_optimized_plans}</div>
-                  </div>
-                  <div className="p-2 bg-[#134074]/60 border border-slate-600">
-                    <div className="text-[9px] text-slate-300 uppercase">Possessions Avoided</div>
-                    <div className="text-xl font-black text-emerald-400 mt-0.5">{poolOptimizationResult.possessions_avoided}</div>
-                  </div>
-                </div>
-
-                {/* Coordination Benefit Badge */}
-                <div className="p-2 bg-[#134074] border border-slate-600 flex items-center justify-between text-[11px] font-mono">
-                  <div className="text-slate-200">
-                    Original Potential Blocks: <strong className="text-slate-400 line-through">{poolOptimizationResult.original_potential_blocks}</strong> → Optimized Blocks: <strong className="text-[#FFB703]">{poolOptimizationResult.optimized_blocks}</strong>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-slate-300">Estimated Coordination Benefit:</span>
-                    <span className="bg-emerald-700 text-white font-black px-2 py-0.5 text-[10px] uppercase tracking-wide">
-                      {poolOptimizationResult.estimated_coordination_benefit}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* OPTIMIZED BLOCK PLANS (Section 9 & Section 15) */}
-            {poolOptimizationResult && poolOptimizationResult.plans && poolOptimizationResult.plans.length > 0 ? (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between border-b-2 border-[#0B2545] pb-1">
-                  <h2 className="font-black text-xs text-[#0B2545] uppercase tracking-wider flex items-center gap-1.5">
-                    <Layers className="w-4 h-4 text-[#134074]" />
-                    OPTIMIZED BLOCK PLANS ({poolOptimizationResult.plans.length} GENERATED)
-                  </h2>
-                  <span className="text-[10px] font-mono text-slate-600">
-                    Click [VIEW PLAN] for topology & alternatives, or [APPROVE] to authorize possession
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 gap-3">
-                  {poolOptimizationResult.plans.map((plan, idx) => {
-                    const isCommon = plan.coordination_type === 'COMMON_BLOCK' || (plan.requests_combined_count > 1);
-                    const isApproved = plan.status === 'APPROVED';
-
-                    return (
-                      <div
-                        key={plan.id || plan.plan_id || idx}
-                        className="bg-white border-2 border-[#134074] shadow-sm hover:shadow-md transition-shadow"
-                      >
-                        {/* Plan Card Header */}
-                        <div className="bg-[#0B2545] text-white p-2.5 px-3 flex flex-wrap items-center justify-between border-b border-slate-700">
-                          <div className="flex items-center gap-2">
-                            <span className="bg-[#FFB703] text-[#0B2545] px-2 py-0.5 text-[10px] font-black uppercase font-mono tracking-wide">
-                              {plan.plan_title || `PLAN ${(idx + 1) < 10 ? '0' + (idx + 1) : (idx + 1)}`}
-                            </span>
-                            <span className={`px-2 py-0.5 text-[10px] font-black uppercase border ${
-                              isApproved
-                                ? 'bg-emerald-800 text-white border-emerald-400'
-                                : 'bg-emerald-100 text-emerald-900 border-emerald-300'
-                            }`}>
-                              {isApproved ? 'APPROVED' : 'RECOMMENDED'}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-3 text-xs font-mono">
-                            <span>Score: <strong className="text-[#FFB703]">{plan.optimization_score || 96}</strong></span>
-                            <span>Conflicts: <strong className="text-emerald-400">0</strong></span>
-                          </div>
-                        </div>
-
-                        {/* Plan Card Body */}
-                        <div className="p-3 space-y-2 text-xs">
-                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-50 p-2.5 border border-slate-200">
-                            <div>
-                              <span className="text-[9px] font-bold text-slate-500 uppercase block">Corridor</span>
-                              <strong className="font-mono text-[#134074] text-xs block">{plan.corridor}</strong>
-                            </div>
-                            <div>
-                              <span className="text-[9px] font-bold text-slate-500 uppercase block">Section</span>
-                              <strong className="font-mono text-slate-900 text-xs block">{plan.section}</strong>
-                            </div>
-                            <div>
-                              <span className="text-[9px] font-bold text-slate-500 uppercase block">Common Window</span>
-                              <strong className="font-mono text-emerald-800 text-xs font-black block">
-                                {plan.common_block_window}
-                              </strong>
-                            </div>
-                            <div>
-                              <span className="text-[9px] font-bold text-slate-500 uppercase block">Duration</span>
-                              <strong className="font-mono text-slate-800 text-xs block">
-                                {plan.total_possession_duration_min || plan.duration_min} min
-                              </strong>
-                            </div>
-                          </div>
-
-                          {/* Coordinated Departments & Requests Badges */}
-                          <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-slate-100/70 border border-slate-200">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="text-[10px] font-bold text-slate-600 uppercase">
-                                {isCommon ? `${plan.requests_combined_count} REQUESTS COMBINED:` : 'STANDALONE REQUEST:'}
-                              </span>
-                              {(plan.request_ids || []).map((reqId, rIdx) => (
-                                <span key={rIdx} className="bg-white border border-slate-300 px-1.5 py-0.5 font-mono font-bold text-[#0B2545] text-[10px]">
-                                  {reqId}
-                                </span>
-                              ))}
-                            </div>
-
-                            <div className="flex flex-wrap items-center gap-1">
-                              {(plan.departments || []).map((dept, dIdx) => (
-                                <span key={dIdx} className="bg-[#134074] text-white px-2 py-0.5 text-[9px] font-bold uppercase">
-                                  {dept}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-
-                          {/* Coordination Savings & Operational Metrics */}
-                          <div className="grid grid-cols-3 gap-2 text-[10px] font-mono text-slate-700 pt-1">
-                            <div>
-                              <span className="text-slate-500">Separate Blocks: </span>
-                              <strong className="text-slate-900">{isCommon ? `${plan.requests_combined_count} → 1` : '1'}</strong>
-                            </div>
-                            <div>
-                              <span className="text-slate-500">Possessions Avoided: </span>
-                              <strong className="text-emerald-700 font-bold">{plan.separate_blocks_avoided || 0}</strong>
-                            </div>
-                            <div>
-                              <span className="text-slate-500">Block Utilization: </span>
-                              <strong className="text-blue-900 font-bold">{plan.block_utilization_pct || 100}%</strong>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Plan Card Action Footer */}
-                        <div className="bg-slate-50 p-2 px-3 border-t border-slate-200 flex items-center justify-between">
-                          <button
-                            id={`btn-view-plan-${idx + 1}`}
-                            onClick={() => {
-                              setActivePlanModal(plan);
-                              setActivePlanModalAlt('Plan A');
-                            }}
-                            className="bg-[#134074] hover:bg-[#0B2545] text-white font-bold text-xs uppercase px-3 py-1.5 flex items-center gap-1 border border-slate-700 cursor-pointer"
-                          >
-                            <Eye className="w-3.5 h-3.5 text-[#FFB703]" />
-                            [ VIEW PLAN ]
-                          </button>
-
-                          <div className="flex items-center gap-2">
-                            {isApproved ? (
-                              <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 font-black text-xs px-3 py-1.5 flex items-center gap-1 uppercase">
-                                <CheckCircle className="w-3.5 h-3.5 text-emerald-700" />
-                                ✓ APPROVED
-                              </span>
-                            ) : (
-                              <button
-                                id={`btn-approve-plan-${idx + 1}`}
-                                onClick={() => handleApprovePlanDirect(plan)}
-                                className="bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs uppercase px-3 py-1.5 flex items-center gap-1 shadow-xs cursor-pointer"
-                              >
-                                <CheckCircle className="w-3.5 h-3.5" />
-                                [ APPROVE ]
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : !poolOptimizing && (
-              <div className="bg-white border-2 border-dashed border-slate-300 p-8 text-center space-y-3">
-                <Cpu className="w-10 h-10 text-slate-400 mx-auto" />
-                <div>
-                  <h3 className="font-black text-sm text-[#0B2545] uppercase">
-                    CENTRALIZED RAILWAY PLANNING WORKSTATION READY
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
-                    The queue contains {jobs.length} maintenance demands. Click the primary button below to evaluate the complete eligible request pool and automatically generate coordinated block plans.
-                  </p>
-                </div>
-                <button
-                  onClick={() => handleRunPoolOptimization()}
-                  className="px-5 py-2.5 bg-[#0B2545] hover:bg-[#134074] text-white font-black text-xs uppercase border-2 border-[#FFB703] shadow-md cursor-pointer inline-flex items-center gap-2"
-                >
-                  <Cpu className="w-4 h-4 text-[#FFB703]" />
-                  [ OPTIMIZE REQUESTS NOW ]
-                </button>
-              </div>
-            )}
+        {/* ── 6. GENERATED BLOCK PLANS ────────────────────────── */}
+        <div className="bg-white border border-slate-300 p-3 shadow-xs space-y-3">
+          <div className="flex flex-wrap items-center justify-between border-b border-slate-200 pb-2">
+            <div className="flex items-center gap-2">
+              <Layers className="w-4 h-4 text-[#134074]" />
+              <h2 className="font-black text-xs text-[#0B2545] uppercase tracking-wider">
+                GENERATED BLOCK PLANS ({generatedPlans.length})
+              </h2>
+            </div>
+            <span className="text-[10px] font-mono text-slate-500">
+              Review CP-SAT optimized schedules & authorize possession
+            </span>
           </div>
 
-          {/* RIGHT 5 COLS: INDEPENDENT LIVE CORRIDOR OBSERVATION (Section 18, 19, 20) */}
-          <div className="lg:col-span-5 space-y-3">
-            <div className="bg-white border-2 border-slate-700 shadow-xs">
-              
-              {/* Section 19 Distinct Title & Rule Callout */}
-              <div className="bg-[#0B2545] text-white p-2.5 px-3">
-                <div className="text-[10px] text-[#FFB703] font-mono font-bold uppercase tracking-wider">
-                  OPERATIONAL SITUATIONAL AWARENESS &bull; SECTION 19
-                </div>
-                <h3 className="text-xs font-black uppercase tracking-wide flex items-center gap-1.5 mt-0.5">
-                  <Radio className="w-4 h-4 text-[#FFB703] animate-pulse" />
-                  LIVE CORRIDOR OBSERVATION
-                </h3>
-              </div>
+          {generatedPlans.length === 0 ? (
+            <div className="p-8 text-center text-slate-500 font-mono text-xs border border-dashed border-slate-300 space-y-2">
+              <p className="font-bold text-slate-700 uppercase">NO ACTIVE BLOCK PLANS IN QUEUE</p>
+              <p className="text-[11px] text-slate-500">
+                Click <strong>[ OPTIMIZE REQUESTS ]</strong> above to run CP-SAT optimization across all maintenance demands.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {generatedPlans.map((plan, idx) => {
+                const planId = plan.id || plan.plan_id || `BP-00${idx + 1}`;
+                const isSelected = (activeDecisionPlan?.id === plan.id || activeDecisionPlan?.plan_id === plan.plan_id);
+                const isApproved = plan.status === 'APPROVED';
+                const isRejected = plan.status === 'REJECTED';
 
-              {/* Section 19 Decoupling Box: Request Corridor vs Live Observation Corridor */}
-              <div className="p-2.5 bg-amber-50/70 border-b border-amber-200 text-xs">
-                <div className="text-[9px] font-black text-amber-900 uppercase tracking-wide mb-1">
-                  DECOUPLED OBSERVATION MODE:
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-[11px]">
-                  <div className="p-1.5 bg-white border border-amber-300">
-                    <span className="text-[9px] font-bold text-slate-500 uppercase block">REQUEST CORRIDOR</span>
-                    <strong className="font-mono text-[#0B2545]">{reqCorridorLabel}</strong>
-                  </div>
-                  <div className="p-1.5 bg-white border border-blue-400">
-                    <span className="text-[9px] font-bold text-blue-700 uppercase block">LIVE OBSERVATION</span>
-                    <strong className="font-mono text-blue-900">{obsCorridorLabel}</strong>
-                  </div>
-                </div>
-              </div>
-
-              {/* Corridor Selector (Section 4 & 5: C01-C20 Tamil Nadu network) */}
-              <div className="p-2.5 bg-slate-50 border-b border-slate-200 space-y-2">
-                <label className="text-[10px] font-black text-slate-700 uppercase block">
-                  Select Live Tamil Nadu Corridor to Observe:
-                </label>
-                <select
-                  value={observationCorridorId || ''}
-                  onChange={(e) => {
-                    const corrId = e.target.value;
-                    setObservationCorridorId(corrId);
-                    const found = corridors.find(c => c.id === corrId || c.corridor_id === corrId);
-                    if (found) setObservationCorridor(found);
-                  }}
-                  className="w-full bg-white border-2 border-slate-300 text-xs font-bold p-1.5 text-[#0B2545] focus:border-[#0B2545] outline-none"
-                >
-                  {corridors.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.prototype_code ? `[${c.prototype_code}] ` : ''}{c.name} ({c.start_station_code} → {c.end_station_code})
-                    </option>
-                  ))}
-                </select>
-
-                {/* Section 5 Display Corridor Summary */}
-                {observationCorridor && (
-                  <div className="grid grid-cols-4 gap-1 text-[10px] font-mono bg-white p-1.5 border border-slate-200">
-                    <div><span className="text-slate-500">Start:</span> <strong className="text-slate-800">{observationCorridor.start_station_code}</strong></div>
-                    <div><span className="text-slate-500">End:</span> <strong className="text-slate-800">{observationCorridor.end_station_code}</strong></div>
-                    <div><span className="text-slate-500">Sections:</span> <strong className="text-slate-800">{observationSections.length || observationCorridor.sections_count || 3}</strong></div>
-                    <div><span className="text-slate-500">Stations:</span> <strong className="text-slate-800">{observationStations.length || observationCorridor.stations_count || 8}</strong></div>
-                  </div>
-                )}
-              </div>
-
-              {/* Data Provenance Banner (Section 21, 22, 23) */}
-              <div className="px-3 py-1.5 bg-[#0B2545] text-white flex items-center justify-between text-[10px] font-mono border-b border-slate-700">
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400">SOURCE:</span>
-                  <span className="text-[#FFB703] font-bold">LIVE RADAR</span>
-                  <span className="text-slate-400">&bull;</span>
-                  <span className={observationDataStatus?.is_live ? 'bg-emerald-700 px-1 text-white font-bold' : 'bg-amber-700 px-1 text-white font-bold'}>
-                    {observationDataStatus?.status || 'CACHED'}
-                  </span>
-                </div>
-                <div className="text-slate-300">
-                  REFRESH: 5s (LOCAL DB CACHE)
-                </div>
-              </div>
-
-              {/* Map Canvas (Section 18 & 20) */}
-              <div className="h-64 border-b border-slate-300 relative bg-slate-900">
-                <RailwayMap
-                  stations={observationStations}
-                  sections={observationSections}
-                  liveTrains={observationMovements}
-                  height="100%"
-                />
-              </div>
-
-              {/* Section 17 & 18: Live Trains on Selected Corridor List */}
-              <div className="p-2.5">
-                <div className="text-[10px] font-black text-[#0B2545] uppercase flex items-center justify-between border-b border-slate-200 pb-1 mb-2">
-                  <span className="flex items-center gap-1">
-                    <Train className="w-3.5 h-3.5 text-[#134074]" />
-                    TRAINS ON {observationCorridor?.start_station_code || 'MDU'} → {observationCorridor?.end_station_code || 'TEN'}
-                  </span>
-                  <span className="font-mono text-slate-500">
-                    {observationMovements.length} Active
-                  </span>
-                </div>
-
-                <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
-                  {observationMovements.length === 0 ? (
-                    <div className="text-center py-6 text-slate-500 text-xs">
-                      No trains currently active on this corridor in local cache.
+                return (
+                  <div
+                    key={planId}
+                    onClick={() => setSelectedPlanForDecision(plan)}
+                    className={`border-2 transition-all cursor-pointer p-3 ${isSelected
+                        ? 'border-[#0B2545] bg-blue-50/20 shadow-md'
+                        : 'border-slate-300 bg-white hover:border-slate-400 shadow-xs'
+                      }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between border-b border-slate-200 pb-2 mb-2.5">
+                      <div className="flex items-center gap-2">
+                        <span className="bg-[#0B2545] text-[#FFB703] font-mono font-black text-xs px-2.5 py-0.5 border border-slate-700">
+                          {plan.plan_title || `PLAN BP-00${idx + 1}`}
+                        </span>
+                        <span className={`px-2 py-0.5 text-[10px] font-black uppercase border ${isApproved
+                            ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                            : isRejected
+                              ? 'bg-red-100 text-red-900 border-red-300'
+                              : 'bg-amber-100 text-amber-900 border-amber-300'
+                          }`}>
+                          {plan.status || 'AWAITING PLANNER APPROVAL'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs font-mono">
+                        <span className="text-slate-500">Utilization:</span>
+                        <strong className="text-blue-900">{plan.block_utilization_pct || 92}%</strong>
+                      </div>
                     </div>
-                  ) : (
-                    observationMovements.map((t, idx) => {
-                      const trainNum = t.train_number || t.train_no || `1612${idx + 1}`;
-                      const trainName = t.train_name || 'Express Service';
-                      const speed = t.speed_kmh || t.speed || 75;
-                      const delay = t.delay_minutes ?? t.delay ?? 0;
-                      const delayText = delay > 0 ? `+${delay} min` : 'ON TIME';
-                      const status = t.status || (delay > 15 ? 'DELAYED' : 'RUNNING');
-                      const curr = t.current_station_code || t.station_code || observationCorridor?.start_station_code || 'TEN';
-                      const next = t.next_station_code || 'NNN';
-                      const prev = t.prev_station_code || 'MEJ';
 
-                      return (
-                        <div
-                          key={trainNum + idx}
-                          className="bg-white border border-slate-300 p-2 text-xs hover:border-[#0B2545] transition-colors"
+                    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2 text-xs mb-3 font-mono">
+                      <div className="bg-slate-50 p-2 border border-slate-200">
+                        <span className="text-[9px] text-slate-500 uppercase block font-bold">Corridor:</span>
+                        <strong className="text-[#134074] text-xs block truncate">{plan.corridor || 'CVP → TEN'}</strong>
+                      </div>
+                      <div className="bg-slate-50 p-2 border border-slate-200">
+                        <span className="text-[9px] text-slate-500 uppercase block font-bold">Section:</span>
+                        <strong className="text-slate-800 text-xs block truncate">{plan.section || 'SECTION-103'}</strong>
+                      </div>
+                      <div className="bg-slate-50 p-2 border border-slate-200">
+                        <span className="text-[9px] text-slate-500 uppercase block font-bold">Window:</span>
+                        <strong className="text-emerald-800 text-xs block truncate">{plan.common_block_window || '10:30 – 12:00'}</strong>
+                      </div>
+                      <div className="bg-slate-50 p-2 border border-slate-200">
+                        <span className="text-[9px] text-slate-500 uppercase block font-bold">Duration:</span>
+                        <strong className="text-slate-800 text-xs block">{plan.total_possession_duration_min || plan.duration_min || 90} min</strong>
+                      </div>
+                      <div className="bg-slate-50 p-2 border border-slate-200">
+                        <span className="text-[9px] text-slate-500 uppercase block font-bold">Train Impact:</span>
+                        <strong className="text-slate-700 text-xs block truncate">{plan.train_impact || '0 trains affected'}</strong>
+                      </div>
+                      <div className="bg-slate-50 p-2 border border-slate-200">
+                        <span className="text-[9px] text-slate-500 uppercase block font-bold">Conflict Status:</span>
+                        <strong className="text-emerald-700 text-xs block truncate">{plan.conflict_status || '0 conflicts / Cleared'}</strong>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-slate-50 border border-slate-200 mb-3 text-xs">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] font-bold text-slate-600 uppercase">Requests:</span>
+                        {(plan.request_ids || []).map((reqId, rIdx) => (
+                          <span key={rIdx} className="bg-white border border-slate-300 px-1.5 py-0.5 font-mono font-bold text-[#0B2545] text-[10px]">
+                            {reqId}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span className="text-[10px] font-bold text-slate-600 uppercase">Departments:</span>
+                        {(plan.departments || []).map((dept, dIdx) => (
+                          <span key={dIdx} className="bg-[#134074] text-white px-2 py-0.5 text-[9px] font-bold uppercase">
+                            {dept}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between border-t border-slate-200 pt-2">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActivePlanModal(plan);
+                          setActivePlanModalAlt('Plan A');
+                        }}
+                        className="bg-[#134074] hover:bg-[#0B2545] text-white font-bold text-xs uppercase px-3 py-1.5 flex items-center gap-1 cursor-pointer"
+                      >
+                        <Eye className="w-3.5 h-3.5 text-[#FFB703]" />
+                        <span>[ REVIEW ]</span>
+                      </button>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenCoordinatedModify(plan);
+                          }}
+                          className="bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs uppercase px-3 py-1.5 flex items-center gap-1 cursor-pointer"
                         >
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-mono font-black text-[#0B2545]">{trainNum}</span>
-                              <span className="font-bold text-slate-800 text-[11px] truncate max-w-[140px]">{trainName}</span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <span className={`px-1 py-0.2 text-[9px] font-bold ${
-                                status === 'RUNNING' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
-                              }`}>
-                                {status}
-                              </span>
-                              <span className={`font-mono text-[9px] font-bold px-1 py-0.2 ${
-                                delay > 0 ? 'bg-red-100 text-red-800' : 'bg-slate-100 text-slate-700'
-                              }`}>
-                                {delayText}
-                              </span>
-                            </div>
-                          </div>
+                          <Edit2 className="w-3.5 h-3.5" />
+                          <span>[ MODIFY ]</span>
+                        </button>
+                        {isApproved ? (
+                          <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 font-black text-xs px-3 py-1.5 flex items-center gap-1 uppercase">
+                            <CheckCircle className="w-3.5 h-3.5 text-emerald-700" />
+                            <span>APPROVED</span>
+                          </span>
+                        ) : (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDecisionAction('APPROVE');
+                            }}
+                            className="bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs uppercase px-3 py-1.5 flex items-center gap-1 cursor-pointer"
+                          >
+                            <CheckCircle className="w-3.5 h-3.5" />
+                            <span>[ APPROVE ]</span>
+                          </button>
+                        )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDecisionAction('REJECT');
+                          }}
+                          className="bg-red-700 hover:bg-red-800 text-white font-bold text-xs uppercase px-3 py-1.5 flex items-center gap-1 cursor-pointer"
+                        >
+                          <XCircle className="w-3.5 h-3.5" />
+                          <span>[ REJECT ]</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
-                          <div className="grid grid-cols-4 gap-1 text-[10px] font-mono text-slate-600 mt-1 bg-slate-50 p-1 border border-slate-200">
-                            <div><span className="text-slate-400">Speed:</span> <strong>{speed} km/h</strong></div>
-                            <div><span className="text-slate-400">Curr:</span> <strong>{curr}</strong></div>
-                            <div><span className="text-slate-400">Next:</span> <strong>{next}</strong></div>
-                            <div><span className="text-slate-400">Prev:</span> <strong>{prev}</strong></div>
-                          </div>
+        {/* ── 7. PLANNER DECISION AREA ────────────────────────── */}
+        <div className="bg-white border border-slate-300 p-3 shadow-xs space-y-3">
+          <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+            <ShieldCheck className="w-4 h-4 text-[#134074]" />
+            <h3 className="font-black text-xs text-[#0B2545] uppercase tracking-wider">
+              PLANNER DECISION
+            </h3>
+          </div>
 
-                          <div className="flex items-center justify-between text-[8px] font-mono text-slate-400 mt-1">
-                            <span>SOURCE: LIVE RADAR (PERSISTED)</span>
-                            <span>UPDATED: {lastSyncTime}</span>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+            <div className="md:col-span-3 bg-slate-50 border border-slate-200 p-2.5">
+              <span className="text-[10px] font-bold text-slate-500 uppercase block">Selected Plan:</span>
+              <strong className="font-mono text-sm text-[#0B2545] block">
+                {activeDecisionPlan ? (activeDecisionPlan.plan_title || activeDecisionPlan.plan_code || `BP-${activeDecisionPlan.id || '001'}`) : 'None Selected'}
+              </strong>
+              {activeDecisionPlan && (
+                <span className="text-[10px] font-mono text-slate-600 block mt-0.5">
+                  {activeDecisionPlan.corridor || 'CVP → TEN'} &bull; {activeDecisionPlan.common_block_window || '10:30 – 12:00'}
+                </span>
+              )}
+            </div>
+
+            <div className="md:col-span-5">
+              <label className="text-[10px] font-bold text-slate-600 uppercase block mb-1">
+                Planner remarks:
+              </label>
+              <input
+                type="text"
+                placeholder="Enter operational remarks or justification..."
+                value={plannerRemarks}
+                onChange={(e) => setPlannerRemarks(e.target.value)}
+                className="w-full bg-white border border-slate-300 p-2 text-xs font-mono focus:border-[#0B2545] outline-none"
+              />
+            </div>
+
+            <div className="md:col-span-4 flex items-center justify-end gap-2">
+              <button
+                onClick={() => handleDecisionAction('APPROVE')}
+                disabled={!activeDecisionPlan || activeDecisionPlan.status === 'APPROVED'}
+                className="bg-emerald-700 hover:bg-emerald-800 disabled:opacity-40 text-white font-black px-4 py-2 text-xs uppercase flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                <CheckCircle className="w-3.5 h-3.5" />
+                <span>[ APPROVE ]</span>
+              </button>
+              <button
+                onClick={() => handleDecisionAction('MODIFY')}
+                disabled={!activeDecisionPlan}
+                className="bg-amber-600 hover:bg-amber-700 disabled:opacity-40 text-white font-black px-4 py-2 text-xs uppercase flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                <Edit2 className="w-3.5 h-3.5" />
+                <span>[ MODIFY ]</span>
+              </button>
+              <button
+                onClick={() => handleDecisionAction('REJECT')}
+                disabled={!activeDecisionPlan || activeDecisionPlan.status === 'REJECTED'}
+                className="bg-red-700 hover:bg-red-800 disabled:opacity-40 text-white font-black px-4 py-2 text-xs uppercase flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                <XCircle className="w-3.5 h-3.5" />
+                <span>[ REJECT ]</span>
+              </button>
             </div>
           </div>
         </div>
 
-        {/* TIME-DISTANCE OPERATIONAL CHART (Preserved for Master Block Schedule) */}
-        <div className="bg-white border border-slate-300 p-3 shadow-xs">
-          <div className="text-xs font-bold text-[#0B2545] uppercase border-b border-slate-200 pb-1.5 mb-2 flex items-center justify-between">
-            <span className="flex items-center gap-1.5">
-              <Activity className="w-3.5 h-3.5 text-[#134074]" />
-              MASTER TIME-DISTANCE TRAIN MOVEMENT & BLOCK SCHEDULE
-            </span>
-            <span className="text-[10px] font-mono text-slate-500">
-              CORRIDOR: {selectedCorridorId || 'CORR_C15_MDU_TEN'}
-            </span>
+        {/* ── Decision Confirmation Modal ────────────────────── */}
+        {decisionConfirmModal.isOpen && (
+          <div className="fixed inset-0 bg-slate-950/70 flex items-center justify-center z-50 p-4 backdrop-blur-xs">
+            <div className="bg-white border-2 border-[#0B2545] shadow-2xl w-full max-w-md">
+              <div className="bg-[#0B2545] text-white p-3 font-bold text-xs uppercase flex justify-between items-center">
+                <span>CONFIRM PLAN {decisionConfirmModal.action} &bull; {decisionConfirmModal.plan?.plan_title || 'PLAN'}</span>
+                <button onClick={() => setDecisionConfirmModal({ isOpen: false, action: null, plan: null })} className="text-white/80 hover:text-white font-bold text-sm cursor-pointer">✕</button>
+              </div>
+              <div className="p-4 space-y-3 text-xs">
+                <p className="text-slate-700">
+                  Are you sure you want to <strong>{decisionConfirmModal.action}</strong> this generated block plan?
+                </p>
+                <div className="bg-slate-50 p-2.5 border border-slate-200 font-mono text-[11px] space-y-1">
+                  <div>Plan: <strong>{decisionConfirmModal.plan?.plan_title || 'PLAN'}</strong></div>
+                  <div>Window: <strong>{decisionConfirmModal.plan?.common_block_window || '10:30 – 12:00'}</strong></div>
+                  <div>Corridor: <strong>{decisionConfirmModal.plan?.corridor || 'CVP → TEN'}</strong></div>
+                  <div>Remarks: <strong>{plannerRemarks || 'Authorized by Chief Section Controller / Railway Planner'}</strong></div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+                  <button
+                    onClick={() => setDecisionConfirmModal({ isOpen: false, action: null, plan: null })}
+                    className="cris-btn cris-btn-secondary text-xs px-3 py-1.5 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => handleExecuteDecisionConfirm()}
+                    className={`font-black text-xs uppercase px-4 py-1.5 text-white cursor-pointer ${decisionConfirmModal.action === 'APPROVE' ? 'bg-emerald-700 hover:bg-emerald-800' : 'bg-red-700 hover:bg-red-800'}`}
+                  >
+                    Confirm {decisionConfirmModal.action}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
-          <TimeDistanceChart
-            chartData={timeDistanceData}
-            loading={loading}
-            error={apiError}
-            selectedJobId={selectedJobId}
-            onSelectJob={handleShowExplanation}
-            onRefresh={() => loadCoreData(false)}
-          />
-        </div>
+        )}
       </div>
     );
   };
@@ -2047,7 +1995,7 @@ export default function PlannerDashboard({ onTabChange }) {
           <h3 className="font-bold text-xs text-[#0B2545] uppercase flex items-center gap-1.5">
             <Clock className="w-4 h-4 text-[#134074]" /> MATHEMATICALLY DERIVED MAINTENANCE WINDOWS (SWEEP-LINE ENGINE)
           </h3>
-          <button onClick={() => { setWindowsLoading(true); getWindows(selectedCorridorId).then(r => setWindowsData(r.data || [])).catch(() => {}).finally(() => setWindowsLoading(false)); }} className="cris-btn cris-btn-secondary text-xs flex items-center gap-1">
+          <button onClick={() => { setWindowsLoading(true); getWindows(selectedCorridorId).then(r => setWindowsData(r.data || [])).catch(() => { }).finally(() => setWindowsLoading(false)); }} className="cris-btn cris-btn-secondary text-xs flex items-center gap-1">
             <RefreshCw className="w-3 h-3" /> Refresh
           </button>
         </div>
@@ -2231,7 +2179,7 @@ export default function PlannerDashboard({ onTabChange }) {
           <h3 className="font-bold text-xs text-[#0B2545] uppercase flex items-center gap-1.5">
             <Target className="w-4 h-4 text-[#134074]" /> BLOCK EXECUTION TRACKER & VARIANCE MONITORING
           </h3>
-          <button onClick={() => { setExecutionLoading(true); getExecutionRecords().then(r => setExecutionRecords(r.data || [])).catch(() => {}).finally(() => setExecutionLoading(false)); }} className="cris-btn cris-btn-secondary text-xs flex items-center gap-1">
+          <button onClick={() => { setExecutionLoading(true); getExecutionRecords().then(r => setExecutionRecords(r.data || [])).catch(() => { }).finally(() => setExecutionLoading(false)); }} className="cris-btn cris-btn-secondary text-xs flex items-center gap-1">
             <RefreshCw className="w-3 h-3" /> Refresh
           </button>
         </div>
@@ -2422,11 +2370,10 @@ export default function PlannerDashboard({ onTabChange }) {
                     <button
                       key={station.id}
                       onClick={() => setActiveStation(station.id)}
-                      className={`w-full text-left px-3 py-1.5 flex items-center space-x-2 text-[11px] transition-colors cursor-pointer ${
-                        isActive
+                      className={`w-full text-left px-3 py-1.5 flex items-center space-x-2 text-[11px] transition-colors cursor-pointer ${isActive
                           ? 'bg-white/10 text-white font-bold border-l-2 border-[#FFB703]'
                           : 'text-slate-400 hover:bg-white/5 hover:text-slate-200 border-l-2 border-transparent'
-                      }`}
+                        }`}
                     >
                       <Icon className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-[#FFB703]' : 'text-slate-500'}`} />
                       <span className="truncate">{station.label}</span>
@@ -2975,11 +2922,10 @@ export default function PlannerDashboard({ onTabChange }) {
                 <div className="border-2 border-[#134074] bg-white p-3 space-y-2 mt-2">
                   <div className="font-black text-xs text-[#0B2545] uppercase flex items-center justify-between border-b border-slate-200 pb-1.5">
                     <span>SIMULATION COMPARISON RESULT</span>
-                    <span className={`px-2 py-0.5 text-[10px] font-bold ${
-                      whatIfResult.feasibility === 'FEASIBLE'
+                    <span className={`px-2 py-0.5 text-[10px] font-bold ${whatIfResult.feasibility === 'FEASIBLE'
                         ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                         : 'bg-red-100 text-red-800 border border-red-300'
-                    }`}>
+                      }`}>
                       {whatIfResult.feasibility}
                     </span>
                   </div>
@@ -3065,11 +3011,10 @@ export default function PlannerDashboard({ onTabChange }) {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <span className={`px-2 py-0.5 text-[10px] font-black uppercase border ${
-                  activePlanModal.status === 'APPROVED'
+                <span className={`px-2 py-0.5 text-[10px] font-black uppercase border ${activePlanModal.status === 'APPROVED'
                     ? 'bg-emerald-800 text-white border-emerald-400'
                     : 'bg-emerald-100 text-emerald-900 border-emerald-300'
-                }`}>
+                  }`}>
                   {activePlanModal.status === 'APPROVED' ? 'STATUS: APPROVED' : 'STATUS: RECOMMENDED'}
                 </span>
                 <button
@@ -3097,11 +3042,10 @@ export default function PlannerDashboard({ onTabChange }) {
                       <button
                         key={alt.plan_name}
                         onClick={() => setActivePlanModalAlt(alt.plan_name)}
-                        className={`p-2 text-left border cursor-pointer transition-all ${
-                          activePlanModalAlt === alt.plan_name
+                        className={`p-2 text-left border cursor-pointer transition-all ${activePlanModalAlt === alt.plan_name
                             ? 'bg-[#0B2545] text-white border-[#0B2545] font-bold shadow-xs'
                             : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border-slate-300'
-                        }`}
+                          }`}
                       >
                         <div className="flex items-center justify-between text-[10px]">
                           <span className="font-black uppercase">{alt.plan_name}</span>

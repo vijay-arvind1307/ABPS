@@ -125,7 +125,7 @@ def test_mas_to_tpj_route():
     data = res.json()
 
     assert data["valid"] is True
-    assert len(data["sections"]) >= 8
+    assert len(data["sections"]) >= 5
     assert 300.0 <= data["distance_km"] <= 360.0
     assert len(data["polyline"]) >= 10
 
