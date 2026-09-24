@@ -86,3 +86,25 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #64748B;
 }
+
+/* Railway Control Room Timeline Scrollbar (High Visibility & Draggable) */
+.control-room-scrollbar::-webkit-scrollbar {
+  width: 10px;
+  height: 12px;
+}
+
+.control-room-scrollbar::-webkit-scrollbar-track {
+  background: #060B16;
+  border-top: 1px solid #1E293B;
+  border-bottom: 1px solid #1E293B;
+}
+
+.control-room-scrollbar::-webkit-scrollbar-thumb {
+  background: #3B82F6;
+  border-radius: 4px;
+  border: 2px solid #060B16;
+}
+
+.control-room-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #60A5FA;
+}

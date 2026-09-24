@@ -40,8 +40,8 @@ def test_full_department_and_planner_lifecycle():
         "job_code": job_code,
         "work_type": "TRACK_TAMPING",
         "description": "Lifecycle test track tamping MAS to TPJ",
-        "start_station_code": "MAS",
-        "end_station_code": "TPJ",
+        "start_station_code": "CVP",
+        "end_station_code": "KDU",
         "user_priority": "HIGH",
         "due_date": due,
         "estimated_duration_min": 60,
@@ -67,7 +67,7 @@ def test_full_department_and_planner_lifecycle():
         "time_limit_seconds": 10,
         "enforce_locks": True
     }, headers=planner_headers)
-    assert opt_res.status_code == 200
+    assert opt_res.status_code == 200, f"Optimize failed with {opt_res.status_code}: {opt_res.json()}"
     plan = opt_res.json()
     plan_id = plan["id"]
 
@@ -166,8 +166,8 @@ def test_department_request_change_flow():
         "job_code": job_code,
         "work_type": "POINT_OVERHAUL",
         "description": "Point overhaul testing change request",
-        "start_station_code": "MAS",
-        "end_station_code": "TPJ",
+        "start_station_code": "CVP",
+        "end_station_code": "KDU",
         "user_priority": "MEDIUM",
         "due_date": due,
         "estimated_duration_min": 45

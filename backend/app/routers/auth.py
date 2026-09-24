@@ -43,7 +43,7 @@ def require_role(allowed_roles: list):
             user_role in allowed_upper or
             (is_dept_user and allowed_has_dept) or
             (is_planner and allowed_has_planner) or
-            is_admin
+            (is_admin and allowed_has_admin)
         )
 
         if not matched:

@@ -13,7 +13,7 @@ python-jose[cryptography]==3.3.0
 python-multipart==0.0.20
 httpx==0.28.1
 pytest==8.3.4
-scikit-learn==1.6.1
-shap==0.46.0
+alembic>=1.14.0
+psycopg2-binary>=2.9.10
 pdfplumber>=0.11.0
 pypdf>=5.0.0

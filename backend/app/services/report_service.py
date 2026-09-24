@@ -53,6 +53,11 @@ class ReportService:
         total_blocks = sum(p.total_blocks_count for p in plans)
         avg_util = round(sum(p.block_utilization_pct for p in plans) / max(1, len(plans)), 1) if plans else 0.0
 
+        # Calculate actual safety compliance rate from validated operational records
+        eval_plans = [p for p in plans if getattr(p, 'approval_status', '') in ('APPROVED', 'COMMITTED', 'COMPLETED')]
+        valid_plans = [p for p in eval_plans if getattr(p, 'is_valid', True)]
+        compliance_rate = round((len(valid_plans) / len(eval_plans)) * 100, 1) if eval_plans else None
+
         return {
             "month": "Current Operating Period",
             "total_block_plans": len(plans),
@@ -61,7 +66,8 @@ class ReportService:
             "total_demands_processed": len(jobs),
             "completed_jobs": sum(1 for j in jobs if j.status == "COMPLETED"),
             "active_sections_serviced": len(sections),
-            "safety_compliance_rate": 100.0
+            "safety_compliance_rate": compliance_rate if compliance_rate is not None else "DATA_INSUFFICIENT_FOR_VALIDATION",
+            "safety_compliance_basis": "VALIDATED_FROM_DATABASE_RECORDS" if compliance_rate is not None else "INSUFFICIENT_OPERATIONAL_RECORDS"
         }
 
     @staticmethod

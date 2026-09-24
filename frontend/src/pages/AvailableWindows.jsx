@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Clock, Shield, Sliders, CheckCircle, RefreshCw, GitBranch } from 'lucide-react';
-import { getWindows, getSections, getCorridors } from '../services/api';
+import { getWindows, recalculateWindows, getSections, getCorridors } from '../services/api';
 
 export default function AvailableWindows() {
   const [windows, setWindows] = useState([]);
@@ -8,6 +8,7 @@ export default function AvailableWindows() {
   const [corridors, setCorridors] = useState([]);
   const [selectedCorridorId, setSelectedCorridorId] = useState('');
   const [loading, setLoading] = useState(true);
+  const [recalculating, setRecalculating] = useState(false);
 
   const loadData = async (corrId = selectedCorridorId) => {
     setLoading(true);
@@ -25,6 +26,19 @@ export default function AvailableWindows() {
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRecalculate = async () => {
+    setRecalculating(true);
+    try {
+      const parsedId = selectedCorridorId ? parseInt(selectedCorridorId) : null;
+      await recalculateWindows(parsedId);
+      await loadData(selectedCorridorId);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setRecalculating(false);
     }
   };
 
@@ -79,9 +93,9 @@ export default function AvailableWindows() {
             </select>
           </div>
 
-          <button onClick={() => loadData()} className="cris-btn cris-btn-secondary text-[11px]">
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-amber-500' : ''}`} />
-            Re-Calculate Windows
+          <button onClick={handleRecalculate} disabled={recalculating || loading} className="cris-btn cris-btn-secondary text-[11px]">
+            <RefreshCw className={`w-3.5 h-3.5 ${recalculating ? 'animate-spin text-amber-500' : ''}`} />
+            {recalculating ? 'Recalculating...' : 'Re-Calculate Windows'}
           </button>
         </div>
       </div>

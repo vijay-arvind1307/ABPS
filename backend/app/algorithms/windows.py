@@ -1,16 +1,62 @@
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from app.core.config import settings
 
 
 class WindowEngine:
     """
-    Mathematical Sweep-Line Maintenance Window Extraction & Validation Engine for IR-ABPS.
-    Complies with SIH26027 Requirements:
-    - Date-specific, section-specific, and request-specific window calculations.
-    - True empty network vs DATA_UNAVAILABLE distinction (never defaults to 00:00-24:00).
-    - Multi-section interval intersection for multi-section possessions.
-    - Exact requested window feasibility checking with explicit train conflict reporting and alternatives.
+    Interval Sweep-Line Maintenance Window Extraction Engine for Indian Railways (SIH26027).
+
+    Safety Principles Enforced:
+    1. MISSING DATA != FREE TRACK:
+       If train timetable or occupancy data is unavailable for a section, the system
+       returns DATA_UNAVAILABLE and never a fake 00:00–24:00 window.
+    2. VERIFIED_EMPTY_INTERVAL:
+       A full-day gap is only generated if the section has verified timetable coverage
+       and zero train movements operate on the target date.
+    3. EXISTING BLOCKS SUBTRACTION:
+       Active, committed, and approved maintenance possessions are treated as hard
+       blocked intervals alongside train movements.
+    4. MULTI-SECTION COMMON WINDOWS:
+       Multi-section demands require mathematically continuous intersection across ALL sections.
     """
+
+    @classmethod
+    def derive_windows_for_section(
+        cls,
+        section_id: int,
+        corridor_id: int,
+        occupancies: List[Dict[str, Any]],
+        existing_blocks: Optional[List[Dict[str, Any]]] = None,
+        has_verified_timetable: bool = True,
+        has_timetable_data: Optional[bool] = None,
+        corridor_opening_start_min: int = 0,
+        corridor_opening_end_min: int = 1440,
+        buffer_before_min: Optional[int] = None,
+        buffer_after_min: Optional[int] = None,
+        min_window_duration_min: int = 30
+    ) -> List[Dict[str, Any]]:
+        """
+        Derives feasible maintenance gap windows using interval sweep-line algorithm.
+        Applies configurable safety buffers before and after train occupancies and existing blocks.
+        """
+        if has_timetable_data is not None:
+            has_verified_timetable = has_timetable_data
+
+        return cls.calculate_feasible_windows(
+            section_id=section_id,
+            corridor_id=corridor_id,
+            occupancies=occupancies,
+            existing_blocks=existing_blocks,
+            has_verified_timetable=has_verified_timetable,
+            has_timetable_data=has_timetable_data,
+            horizon_start_min=0,
+            horizon_end_min=1440,
+            corridor_opening_start_min=corridor_opening_start_min,
+            corridor_opening_end_min=corridor_opening_end_min,
+            buffer_before_min=buffer_before_min,
+            buffer_after_min=buffer_after_min,
+            min_window_duration_min=min_window_duration_min
+        )
 
     @classmethod
     def calculate_feasible_windows(
@@ -18,30 +64,52 @@ class WindowEngine:
         section_id: int,
         corridor_id: int,
         occupancies: List[Dict[str, Any]],
+        existing_blocks: Optional[List[Dict[str, Any]]] = None,
+        has_verified_timetable: bool = True,
+        has_timetable_data: Optional[bool] = None,
         horizon_start_min: int = 0,
         horizon_end_min: int = 1440,
-        buffer_before_min: Optional[int] = None,
-        buffer_after_min: Optional[int] = None,
-        min_window_duration_min: int = 30,
         corridor_opening_start_min: int = 0,
         corridor_opening_end_min: int = 1440,
-        has_timetable_data: bool = True
+        buffer_before_min: Optional[int] = None,
+        buffer_after_min: Optional[int] = None,
+        min_window_duration_min: int = 30
     ) -> List[Dict[str, Any]]:
+        """
+        Computes mathematically verified feasible maintenance windows for a specific railway section.
+        """
+        if has_timetable_data is not None:
+            has_verified_timetable = has_timetable_data
+
         b_before = buffer_before_min if buffer_before_min is not None else settings.BUFFER_BEFORE_MIN
         b_after = buffer_after_min if buffer_after_min is not None else settings.BUFFER_AFTER_MIN
 
-        # If timetable data is completely missing, do not fabricate 00:00–24:00
-        if not has_timetable_data:
+        if horizon_end_min <= horizon_start_min:
             return []
 
-        # Filter occupancies for this section
+        # CRITICAL SAFETY RULE: Missing Timetable Data != Free Track
+        # If timetable data is not verified, no feasible windows can be certified.
+        if not has_verified_timetable:
+            return []
+
+        # Filter train occupancies for this section
         sec_occ = [
             o for o in occupancies
-            if o.get("section_id") == section_id and o.get("estimated_exit_min", 0) > horizon_start_min and o.get("estimated_entry_min", 0) < horizon_end_min
+            if o.get("section_id") == section_id and
+            o.get("estimated_exit_min", 0) > horizon_start_min and
+            o.get("estimated_entry_min", 0) < horizon_end_min
         ]
 
-        # If no train occupancies exist in this horizon for a verified timetable section:
-        if not sec_occ:
+        # Filter existing blocks for this section
+        sec_blocks = [
+            b for b in (existing_blocks or [])
+            if b.get("section_id") == section_id and
+            b.get("end_min", 0) > horizon_start_min and
+            b.get("start_min", 0) < horizon_end_min
+        ]
+
+        # Verified quiet section (True empty network)
+        if not sec_occ and not sec_blocks and has_verified_timetable:
             eff_start = max(horizon_start_min, corridor_opening_start_min)
             eff_end = min(horizon_end_min, corridor_opening_end_min)
             eff_duration = eff_end - eff_start
@@ -60,55 +128,68 @@ class WindowEngine:
                     "constraints_applied_json": {
                         "buffer_before_min": b_before,
                         "buffer_after_min": b_after,
-                        "corridor_start": corridor_opening_start_min,
-                        "corridor_end": corridor_opening_end_min,
-                        "traffic_status": "VERIFIED_QUIET_INTERVAL"
+                        "traffic_status": "VERIFIED_EMPTY_INTERVAL"
                     },
                     "feasibility": "FEASIBLE",
-                    "source": "STATIC_TIMETABLE_VERIFIED"
+                    "source": "VERIFIED_EMPTY_INTERVAL"
                 }]
             return []
 
-        # Merge overlapping/adjacent train occupancies into unified blocked intervals
+        # Build blocked intervals from both train occupancies and existing blocks
         intervals = []
         for o in sec_occ:
             intervals.append({
                 "start": max(horizon_start_min, o["estimated_entry_min"]),
                 "end": min(horizon_end_min, o["estimated_exit_min"]),
-                "train_no": str(o.get("train_number", "UNKNOWN"))
+                "identifier": str(o.get("train_number", "TRAIN")),
+                "type": "TRAIN"
             })
 
-        # Sort by start time
+        for b in sec_blocks:
+            intervals.append({
+                "start": max(horizon_start_min, b["start_min"]),
+                "end": min(horizon_end_min, b["end_min"]),
+                "identifier": str(b.get("block_code", "EXISTING_BLOCK")),
+                "type": "BLOCK"
+            })
+
+        # Sort blocked intervals by start time
         intervals.sort(key=lambda x: x["start"])
 
-        # Merge overlapping train occupancy intervals
-        merged_train_blocks = []
+        # Merge overlapping blocked intervals
+        merged_blocks = []
         for iv in intervals:
-            if not merged_train_blocks:
-                merged_train_blocks.append(iv)
+            if not merged_blocks:
+                merged_blocks.append(iv)
             else:
-                last = merged_train_blocks[-1]
+                last = merged_blocks[-1]
                 if iv["start"] <= last["end"]:
                     last["end"] = max(last["end"], iv["end"])
-                    last["train_no"] = f"{last['train_no']}, {iv['train_no']}"
+                    last["identifier"] = f"{last['identifier']}, {iv['identifier']}"
                 else:
-                    merged_train_blocks.append(iv)
+                    merged_blocks.append(iv)
 
-        # Sweep-line to find gaps
+        # Sweep-line to extract feasible gaps
         candidate_windows = []
         current_time = horizon_start_min
         window_idx = 1
-        train_before = "HEAD_OF_SCHEDULE"
+        item_before = "HEAD_OF_SCHEDULE"
 
-        for blk in merged_train_blocks:
-            train_start = blk["start"]
-            raw_gap = train_start - current_time
+        has_live = any(
+            o.get("data_quality_state") in ("LIVE", "LIVE_TELEMETRY") or 
+            o.get("source") in ("LIVE", "LIVE_TELEMETRY") or
+            o.get("is_live") is True
+            for o in sec_occ
+        )
+        source_label = "LIVE TELEMETRY + STATIC TIMETABLE" if has_live else "STATIC TIMETABLE + EXISTING BLOCKS"
 
-            # Compute usable window after applying safety buffers
+        for blk in merged_blocks:
+            block_start = blk["start"]
+            raw_gap = block_start - current_time
+
             usable_start = current_time + (b_before if current_time > horizon_start_min else 0)
-            usable_end = train_start - b_after
+            usable_end = block_start - b_after
 
-            # Intersect with corridor opening hours
             eff_start = max(usable_start, corridor_opening_start_min)
             eff_end = min(usable_end, corridor_opening_end_min)
             eff_duration = eff_end - eff_start
@@ -123,8 +204,8 @@ class WindowEngine:
                     "end_min": eff_end,
                     "usable_duration_min": eff_duration,
                     "raw_gap_min": raw_gap,
-                    "train_before_no": train_before,
-                    "train_after_no": blk["train_no"],
+                    "train_before_no": item_before,
+                    "train_after_no": blk["identifier"],
                     "constraints_applied_json": {
                         "buffer_before_min": b_before,
                         "buffer_after_min": b_after,
@@ -132,14 +213,14 @@ class WindowEngine:
                         "corridor_end": corridor_opening_end_min
                     },
                     "feasibility": "FEASIBLE",
-                    "source": "LIVE TELEMETRY + STATIC TIMETABLE" if any(o.get("is_live", False) for o in sec_occ) else "STATIC TIMETABLE + EXISTING BLOCKS"
+                    "source": source_label
                 })
                 window_idx += 1
 
             current_time = blk["end"]
-            train_before = blk["train_no"]
+            item_before = blk["identifier"]
 
-        # Final trailing window from last train to horizon end
+        # Final trailing window
         if current_time < horizon_end_min:
             usable_start = current_time + b_before
             usable_end = horizon_end_min
@@ -157,14 +238,14 @@ class WindowEngine:
                     "end_min": eff_end,
                     "usable_duration_min": eff_duration,
                     "raw_gap_min": horizon_end_min - current_time,
-                    "train_before_no": train_before,
+                    "train_before_no": item_before,
                     "train_after_no": "TAIL_OF_SCHEDULE",
                     "constraints_applied_json": {
                         "buffer_before_min": b_before,
                         "buffer_after_min": b_after
                     },
                     "feasibility": "FEASIBLE",
-                    "source": "LIVE TELEMETRY + STATIC TIMETABLE" if any(o.get("is_live", False) for o in sec_occ) else "STATIC TIMETABLE + EXISTING BLOCKS"
+                    "source": source_label
                 })
 
         return candidate_windows
@@ -184,15 +265,14 @@ class WindowEngine:
             return []
 
         section_ids = list(section_windows_map.keys())
-        first_sec_wins = section_windows_map[section_ids[0]]
+        first_sec_wins = [w for w in section_windows_map[section_ids[0]] if w.get("feasibility") == "FEASIBLE"]
         if not first_sec_wins:
             return []
 
-        # Start with intervals from first section
         current_intervals = [(w["start_min"], w["end_min"]) for w in first_sec_wins]
 
         for sec_id in section_ids[1:]:
-            sec_wins = section_windows_map[sec_id]
+            sec_wins = [w for w in section_windows_map[sec_id] if w.get("feasibility") == "FEASIBLE"]
             next_intervals = []
             for s1, e1 in current_intervals:
                 for w in sec_wins:
@@ -205,7 +285,6 @@ class WindowEngine:
             if not current_intervals:
                 break
 
-        # Deduplicate and sort intervals
         current_intervals.sort(key=lambda x: x[0])
         merged = []
         for s, e in current_intervals:
@@ -242,6 +321,7 @@ class WindowEngine:
         duration_min: int,
         occupancies: List[Dict[str, Any]],
         existing_blocks: Optional[List[Dict[str, Any]]] = None,
+        has_verified_timetable: bool = True,
         buffer_before_min: Optional[int] = None,
         buffer_after_min: Optional[int] = None
     ) -> Dict[str, Any]:
@@ -252,98 +332,76 @@ class WindowEngine:
         b_before = buffer_before_min if buffer_before_min is not None else settings.BUFFER_BEFORE_MIN
         b_after = buffer_after_min if buffer_after_min is not None else settings.BUFFER_AFTER_MIN
 
-        # Filter occupancies and existing blocks for affected sections
-        affected_sec_set = set(section_ids) if section_ids else set()
+        if not has_verified_timetable:
+            return {
+                "is_feasible": False,
+                "reason": "DATA_UNAVAILABLE: Timetable data not verified for affected sections.",
+                "conflicts": [],
+                "feasible_alternatives": [],
+                "affected_sections": section_ids
+            }
 
+        affected_sec_set = set(section_ids) if section_ids else set()
         conflicts = []
+
+        # Check train conflicts
         for o in occupancies:
             if not affected_sec_set or o.get("section_id") in affected_sec_set:
-                o_entry = o.get("estimated_entry_min", 0)
-                o_exit = o.get("estimated_exit_min", 0)
-                # Check intersection: max(start1, start2) < min(end1, end2)
-                # Train safety envelope = [o_entry - b_after, o_exit + b_before]
-                buf_entry = max(0, o_entry - b_after)
-                buf_exit = min(1440, o_exit + b_before)
-                if max(req_start_min, buf_entry) < min(req_end_min, buf_exit):
+                t_start = o.get("estimated_entry_min", 0) - b_after
+                t_end = o.get("estimated_exit_min", 0) + b_before
+                if max(req_start_min, t_start) < min(req_end_min, t_end):
                     conflicts.append({
                         "type": "TRAIN_CONFLICT",
-                        "train_number": str(o.get("train_number", "UNKNOWN")),
-                        "train_name": str(o.get("train_name", "Express")),
+                        "train_number": o.get("train_number"),
+                        "train_name": o.get("train_name"),
                         "section_id": o.get("section_id"),
-                        "occupied_from": f"{o_entry // 60:02d}:{o_entry % 60:02d}",
-                        "occupied_to": f"{o_exit // 60:02d}:{o_exit % 60:02d}",
-                        "buffer_before_min": b_before,
-                        "buffer_after_min": b_after,
-                        "description": (
-                            f"Conflict with Train {o.get('train_number')} ({o.get('train_name', 'Express')}) "
-                            f"occupying section from {o_entry // 60:02d}:{o_entry % 60:02d} to {o_exit // 60:02d}:{o_exit % 60:02d} "
-                            f"(with {b_before}m safety buffer)."
-                        )
+                        "entry_min": o.get("estimated_entry_min"),
+                        "exit_min": o.get("estimated_exit_min")
                     })
 
-        # Check existing blocks
-        if existing_blocks:
-            for blk in existing_blocks:
-                if not affected_sec_set or blk.get("section_id") in affected_sec_set:
-                    blk_start = blk.get("start_min", 0)
-                    blk_end = blk.get("end_min", 0)
-                    if max(req_start_min, blk_start) < min(req_end_min, blk_end):
-                        conflicts.append({
-                            "type": "EXISTING_BLOCK_CONFLICT",
-                            "block_code": blk.get("plan_code") or blk.get("job_code") or "APPROVED_BLOCK",
-                            "section_id": blk.get("section_id"),
-                            "occupied_from": f"{blk_start // 60:02d}:{blk_start % 60:02d}",
-                            "occupied_to": f"{blk_end // 60:02d}:{blk_end % 60:02d}",
-                            "description": f"Overlaps with approved maintenance block {blk.get('plan_code', 'COMMITTED')}."
-                        })
+        # Check existing block conflicts
+        for b in (existing_blocks or []):
+            if not affected_sec_set or b.get("section_id") in affected_sec_set:
+                b_start = b.get("start_min", 0) - b_after
+                b_end = b.get("end_min", 0) + b_before
+                if max(req_start_min, b_start) < min(req_end_min, b_end):
+                    conflicts.append({
+                        "type": "EXISTING_BLOCK_CONFLICT",
+                        "block_code": b.get("block_code"),
+                        "section_id": b.get("section_id"),
+                        "start_min": b.get("start_min"),
+                        "end_min": b.get("end_min")
+                    })
 
-        # Calculate genuine alternative windows
-        sec_wins_map = {}
-        for s_id in (section_ids or [0]):
-            wins = cls.calculate_feasible_windows(
+        # Calculate feasible alternatives across all affected sections
+        sec_map = {}
+        for s_id in (section_ids or [1]):
+            sec_map[s_id] = cls.derive_windows_for_section(
                 section_id=s_id,
                 corridor_id=corridor_id,
                 occupancies=occupancies,
-                min_window_duration_min=duration_min,
-                buffer_before_min=b_before,
-                buffer_after_min=b_after,
-                has_timetable_data=len(occupancies) > 0
+                existing_blocks=existing_blocks,
+                has_verified_timetable=has_verified_timetable,
+                min_window_duration_min=duration_min
             )
-            sec_wins_map[s_id] = wins
 
-        if len(sec_wins_map) > 1:
-            feasible_alternatives = cls.intersect_windows_for_sections(sec_wins_map, min_duration_min=duration_min)
+        if len(sec_map) > 1:
+            alternatives = cls.intersect_windows_for_sections(sec_map, min_duration_min=duration_min)
         else:
-            first_s_id = list(sec_wins_map.keys())[0] if sec_wins_map else 0
-            feasible_alternatives = sec_wins_map.get(first_s_id, [])
+            first_id = list(sec_map.keys())[0]
+            alternatives = [w for w in sec_map[first_id] if w.get("feasibility") == "FEASIBLE"]
 
-        # Filter out the requested window from alternatives
-        formatted_alternatives = []
-        for alt in feasible_alternatives[:5]:
-            s_hh, s_mm = divmod(alt["start_min"], 60)
-            e_hh, e_mm = divmod(alt["end_min"], 60)
-            alt_str = f"{s_hh:02d}:{s_mm:02d} – {e_hh:02d}:{e_mm:02d}"
-            formatted_alternatives.append({
-                "start_min": alt["start_min"],
-                "end_min": alt["end_min"],
-                "window": alt_str,
-                "duration_min": alt["usable_duration_min"]
-            })
-
-        is_feasible = (len(conflicts) == 0) and (req_end_min - req_start_min >= duration_min)
+        is_feasible = (len(conflicts) == 0 and (req_end_min - req_start_min) >= duration_min)
 
         return {
-            "feasible": is_feasible,
             "is_feasible": is_feasible,
-            "status": "FEASIBLE" if is_feasible else "NOT_FEASIBLE",
-            "requested_window": f"{req_start_min // 60:02d}:{req_start_min % 60:02d} – {req_end_min // 60:02d}:{req_end_min % 60:02d}",
-            "duration_min": duration_min,
             "conflicts_count": len(conflicts),
             "conflicts": conflicts,
-            "recommended_alternatives": formatted_alternatives,
-            "message": (
-                "Requested maintenance window is fully feasible and conflict-free."
-                if is_feasible else
-                f"Requested window conflicts with {len(conflicts)} train movement(s) or possession(s)."
-            )
+            "feasible_alternatives": alternatives,
+            "recommended_alternatives": alternatives,
+            "alternatives": alternatives,
+            "requested_start_min": req_start_min,
+            "requested_end_min": req_end_min,
+            "requested_duration_min": duration_min,
+            "affected_sections": section_ids
         }

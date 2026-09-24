@@ -110,10 +110,10 @@ class RailwayStationItem(BaseModel):
     name: str
     station_name: Optional[str] = None
     normalized_name: Optional[str] = None
-    state: str
+    state: Optional[str] = None
     district: Optional[str] = None
-    division: str
-    category: str
+    division: Optional[str] = None
+    category: Optional[str] = None
     station_type: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None

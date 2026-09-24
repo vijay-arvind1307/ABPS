@@ -1,13 +1,20 @@
 import time
 from typing import List, Dict, Any, Optional, Tuple
 from ortools.sat.python import cp_model
+from app.algorithms.coordination import CompatibilityEngine
 
 
 class CPSATSolver:
     """
-    Google OR-Tools CP-SAT Constraint Optimization Solver for IR-ABPS.
-    Solves Multi-Department Maintenance Block Scheduling with hard safety constraints,
-    resource limits, precedence dependencies, locked planner decisions, and multiple objective strategies (Plan A/B/C).
+    Google OR-Tools CP-SAT Constraint Optimization Solver for IR-ABPS (SIH26027).
+    Solves Multi-Department Maintenance Block Scheduling with verified physical safety constraints,
+    resource capacities, precedence dependencies, locked planner decisions, and distinct objective strategies (Plan A/B/C).
+
+    Safety Principles Enforced:
+    1. Cross-department tasks overlap ONLY if work types are verified as physically compatible.
+    2. Multi-section demands are scheduled across common feasible intervals.
+    3. INFEASIBLE, MODEL_INVALID, and UNKNOWN solver statuses return complete, non-crashing responses.
+    4. Metric proxies are derived from verifiable operational facts, never fabricated curve fits.
     """
 
     def __init__(self, time_limit_seconds: int = 15):
@@ -30,24 +37,44 @@ class CPSATSolver:
             return {
                 "solver_status": "NO_INPUT_DATA",
                 "objective_score": 0.0,
+                "critical_jobs_completed": 0,
+                "total_critical_jobs": sum(1 for j in jobs if ("Tier 1" in j.get("safety_tier", "") or "Tier 2" in j.get("safety_tier", "") or j.get("is_emergency", False))),
+                "total_jobs_completed": 0,
+                "total_jobs_demanded": len(jobs),
+                "total_blocks_count": 0,
+                "block_utilization_pct": 0.0,
+                "train_impact_score": None,
+                "asset_availability_proxy": None,
                 "scheduled_jobs": [],
                 "deferred_jobs": [j["id"] for j in jobs],
                 "blocks": [],
-                "computation_time_ms": (time.time() - start_wall_time) * 1000,
-                "status_message": "No jobs or windows available for optimization."
+                "computation_time_ms": round((time.time() - start_wall_time) * 1000, 2),
+                "status_message": "No maintenance requests or feasible windows available for optimization."
             }
 
         # Index data
         job_map = {j["id"]: j for j in jobs}
         window_map = {w["id"]: w for w in windows}
 
-        # Map candidate windows per job (matches section_id if set, and window duration >= job duration)
+        # Map candidate windows per job (matches physical section / affected sections and duration)
         candidate_windows_for_job: Dict[int, List[int]] = {}
         for j in jobs:
             cands = []
             j_sec = j.get("section_id")
+            aff_secs = set(j.get("affected_section_ids") or [])
+            if j_sec:
+                aff_secs.add(j_sec)
+
             for w in windows:
-                if (j_sec is None or w["section_id"] == j_sec) and w["usable_duration_min"] >= j["estimated_duration_min"]:
+                if w.get("feasibility") and w.get("feasibility") not in ("FEASIBLE", "SWEEP_LINE_DERIVED", "VERIFIED_EMPTY_INTERVAL"):
+                    continue
+                w_sec = w.get("section_id")
+                w_secs = set(w.get("section_ids") or ([w_sec] if w_sec else []))
+                w_dur = w.get("usable_duration_min", 0)
+
+                # Geographic match: job sections must intersect window sections
+                sec_match = bool(aff_secs & w_secs) if aff_secs else (j_sec == w_sec if j_sec and w_sec else False)
+                if sec_match and w_dur >= j["estimated_duration_min"]:
                     cands.append(w["id"])
             candidate_windows_for_job[j["id"]] = cands
 
@@ -83,8 +110,8 @@ class CPSATSolver:
                 win_vars.append(x_jw)
 
                 # Optional interval for window assignment
-                s_opt = model.NewIntVar(w["start_min"], w["end_min"] - dur, f"s_{j_id}_{w_id}")
-                e_opt = model.NewIntVar(w["start_min"] + dur, w["end_min"], f"e_{j_id}_{w_id}")
+                s_opt = model.NewIntVar(w["start_min"], max(w["start_min"], w["end_min"] - dur), f"s_{j_id}_{w_id}")
+                e_opt = model.NewIntVar(min(w["end_min"], w["start_min"] + dur), w["end_min"], f"e_{j_id}_{w_id}")
                 interval = model.NewOptionalIntervalVar(s_opt, dur, e_opt, x_jw, f"interval_{j_id}_{w_id}")
                 job_window_intervals[(j_id, w_id)] = (interval, s_opt, e_opt)
 
@@ -98,18 +125,20 @@ class CPSATSolver:
             else:
                 model.Add(is_sched == 0)
 
-            # Locked decisions
+            # Locked decisions: preserve planned or committed start
             if enforce_locks and j.get("is_locked", False):
                 model.Add(is_sched == 1)
                 if j.get("locked_start_min") is not None:
                     model.Add(s_var == j["locked_start_min"])
 
-            # Completed jobs cannot be moved / must be preserved
-            if j.get("status") == "COMPLETED":
+            # Completed jobs cannot be moved
+            if j.get("status") == "COMPLETED" or j.get("execution_status") == "COMPLETED":
                 model.Add(is_sched == 1)
+                if j.get("actual_start_min") is not None:
+                    model.Add(s_var == j["actual_start_min"])
 
         # ----------------------------------------------------
-        # HARD CONSTRAINT 1: Window Capacity and Non-Overlapping Execution (Phase 21 Fix)
+        # HARD CONSTRAINT 1: Work-Type Compatibility on Track Section
         # ----------------------------------------------------
         for w in windows:
             w_id = w["id"]
@@ -122,28 +151,36 @@ class CPSATSolver:
                     j1_id = j1["id"]
                     j2_id = j2["id"]
 
-                    dept1 = str(j1.get("department") or "").upper()
-                    dept2 = str(j2.get("department") or "").upper()
+                    dept1 = str(j1.get("department_code") or j1.get("department") or "").upper()
+                    dept2 = str(j2.get("department_code") or j2.get("department") or "").upper()
+                    wt1 = str(j1.get("work_type") or "").upper()
+                    wt2 = str(j2.get("work_type") or "").upper()
+
                     comp_ids1 = j1.get("compatible_job_ids", [])
                     comp_ids2 = j2.get("compatible_job_ids", [])
-                    is_compatible = (
-                        (dept1 and dept2 and dept1 != dept2) or
+
+                    # Physical compatibility requires explicit work-type safety check
+                    both_insp = ("INSPECTION" in wt1 and "INSPECTION" in wt2)
+                    is_work_compatible = (
+                        both_insp or
+                        (wt1, wt2) in CompatibilityEngine.PARALLEL_COMPATIBLE_WORK_TYPES or
+                        (wt2, wt1) in CompatibilityEngine.PARALLEL_COMPATIBLE_WORK_TYPES
+                    )
+
+                    is_compatible = is_work_compatible and (
                         (j2_id in comp_ids1 or j1_id in comp_ids2) or
+                        (dept1 != dept2) or
                         (j1.get("is_shadow_compatible", False) and j2.get("is_shadow_compatible", False))
                     )
 
                     if not is_compatible:
-                        # Incompatible jobs must not overlap:
-                        # Either j1 before j2 OR j2 before j1.
-                        # Modeled via boolean disjunction b to avoid simultaneous ordering infeasibility (Phase 21)
+                        # Incompatible jobs must NOT overlap: either j1 before j2 OR j2 before j1
                         b = model.NewBoolVar(f"order_{j1_id}_{j2_id}_{w_id}")
                         _, s1, e1 = job_window_intervals[(j1_id, w_id)]
                         _, s2, e2 = job_window_intervals[(j2_id, w_id)]
 
                         model.Add(e1 <= s2).OnlyEnforceIf([x[(j1_id, w_id)], x[(j2_id, w_id)], b])
                         model.Add(e2 <= s1).OnlyEnforceIf([x[(j1_id, w_id)], x[(j2_id, w_id)], b.Not()])
-
-
 
         # ----------------------------------------------------
         # HARD CONSTRAINT 2: Dependencies (Finish-to-Start)
@@ -155,25 +192,21 @@ class CPSATSolver:
                 min_gap = dep.get("min_gap_min", 0)
 
                 if p_id in is_scheduled and s_id in is_scheduled:
-                    # If both scheduled, predecessor must finish before successor starts
                     model.Add(end_time[p_id] + min_gap <= start_time[s_id]).OnlyEnforceIf([is_scheduled[p_id], is_scheduled[s_id]])
-                    # If successor is scheduled, predecessor MUST be scheduled
                     model.AddImplication(is_scheduled[s_id], is_scheduled[p_id])
 
         # ----------------------------------------------------
-        # HARD CONSTRAINT 3: Exclusive Resource Availability
+        # HARD CONSTRAINT 3: Exclusive Resource Capacities
         # ----------------------------------------------------
         if resources:
             for res in resources:
                 res_id = res["id"]
                 capacity = res.get("total_quantity", 1)
-                # Find all jobs requiring this resource
                 res_intervals = []
                 for j in jobs:
                     j_id = j["id"]
                     reqs = j.get("required_resource_ids", [])
                     if res_id in reqs:
-                        # Add intervals
                         for w in windows:
                             w_id = w["id"]
                             if (j_id, w_id) in job_window_intervals:
@@ -184,9 +217,7 @@ class CPSATSolver:
                     demands = [item[1] for item in res_intervals]
                     model.AddCumulative(intervals_only, demands, capacity)
 
-        # ----------------------------------------------------
-        # WINDOW USAGE VARIABLES (For block minimization)
-        # ----------------------------------------------------
+        # Window usage variables (for block consolidation)
         window_used = {}
         for w in windows:
             w_id = w["id"]
@@ -205,12 +236,11 @@ class CPSATSolver:
 
         for j in jobs:
             j_id = j["id"]
-            priority = int(j.get("priority_score", 50) * 10)  # Integer scale 0 - 1000
+            priority = int(float(j.get("priority_score", 50.0)) * 10)  # Integer scale 0 - 1000
             is_emergency = j.get("is_emergency", False)
-            safety_tier = j.get("safety_tier", "")
+            safety_tier = str(j.get("safety_tier", ""))
             is_critical = ("Tier 1" in safety_tier or "Tier 2" in safety_tier or is_emergency)
 
-            # Heavy bonus for scheduling critical / emergency jobs
             sched_weight = priority
             if is_emergency:
                 sched_weight += 5000
@@ -219,34 +249,32 @@ class CPSATSolver:
 
             obj_terms.append(sched_weight * is_scheduled[j_id])
 
-        # Plan-specific objectives
         if strategy == "PLAN_A":
-            # Maximize Asset Availability / Critical Work Completion + Multi-Dept Coordination
+            # Maximize Multi-Department Coordination & Critical Asset Availability
             for w in windows:
                 w_id = w["id"]
-                # Bonus for packing multiple jobs into the same window (coordination)
                 w_jobs = [x[(j["id"], w_id)] for j in jobs if (j["id"], w_id) in x]
                 if len(w_jobs) > 1:
-                    obj_terms.append(50 * sum(w_jobs))
+                    obj_terms.append(100 * sum(w_jobs))
 
         elif strategy == "PLAN_B":
-            # Minimize Train Disruption: prefer windows with larger raw gaps / lower traffic impact
+            # Minimize Train Disruption & Favor Off-Peak Large Windows
             for w in windows:
                 w_id = w["id"]
-                train_impact_penalty = int(max(10, 100 - w["usable_duration_min"]))
+                # Penalty for using windows close to high train volume
+                raw_gap = w.get("raw_gap_min", w.get("usable_duration_min", 60))
+                train_impact_penalty = max(10, 180 - raw_gap)
                 obj_terms.append(-1 * train_impact_penalty * window_used[w_id])
 
         elif strategy == "PLAN_C":
-            # Minimize Number of Separate Blocks / Maximize Block Utilization
+            # Minimize Block Count & Maximize Track Utilization
             for w in windows:
                 w_id = w["id"]
-                # Strong penalty for each separate window opened
-                obj_terms.append(-300 * window_used[w_id])
-                # Reward total duration utilized
+                obj_terms.append(-400 * window_used[w_id])
                 for j in jobs:
                     j_id = j["id"]
                     if (j_id, w_id) in x:
-                        obj_terms.append(2 * job_map[j_id]["estimated_duration_min"] * x[(j_id, w_id)])
+                        obj_terms.append(3 * job_map[j_id]["estimated_duration_min"] * x[(j_id, w_id)])
 
         model.Maximize(sum(obj_terms))
 
@@ -257,17 +285,36 @@ class CPSATSolver:
 
         status = solver.Solve(model)
         comp_time = (time.time() - start_wall_time) * 1000
-
         status_name = solver.StatusName(status)
+
+        critical_jobs_count = sum(
+            1 for j in jobs
+            if ("Tier 1" in str(j.get("safety_tier", "")) or "Tier 2" in str(j.get("safety_tier", "")) or j.get("is_emergency", False))
+        )
+
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             return {
                 "solver_status": status_name,
                 "objective_score": 0.0,
+                "critical_jobs_completed": 0,
+                "total_critical_jobs": critical_jobs_count,
+                "total_jobs_completed": 0,
+                "total_jobs_demanded": len(jobs),
+                "total_blocks_count": 0,
+                "block_utilization_pct": 0.0,
+                "train_impact_score": None,
+                "asset_availability_proxy": None,
                 "scheduled_jobs": [],
                 "deferred_jobs": [j["id"] for j in jobs],
                 "blocks": [],
                 "computation_time_ms": round(comp_time, 2),
-                "status_message": "No feasible plan satisfies all hard safety and resource constraints."
+                "status_message": f"NO_FEASIBLE_PLAN: Solver returned {status_name}. Hard safety or resource constraints prevent scheduling.",
+                "blocking_constraints": [
+                    "Required maintenance duration exceeds available gap windows",
+                    "Headway safety buffer conflicts with train paths",
+                    "Inter-departmental work-type incompatibility",
+                    "Resource capacity limits or predecessor dependency restrictions"
+                ]
             }
 
         # Extract Solution
@@ -294,6 +341,9 @@ class CPSATSolver:
                     "job_code": j.get("job_code", f"JOB_{j_id}"),
                     "window_id": assigned_w_id,
                     "section_id": j.get("section_id"),
+                    "affected_section_ids": j.get("affected_section_ids", []),
+                    "work_type": j.get("work_type"),
+                    "department_code": j.get("department_code"),
                     "scheduled_start_min": s_val,
                     "scheduled_end_min": e_val,
                     "scheduled_duration_min": j["estimated_duration_min"],
@@ -319,28 +369,18 @@ class CPSATSolver:
             else:
                 deferred_jobs_result.append(j_id)
 
-        # Compute Block Metrics
+        # Compute Verified Block Metrics
         total_blocks = len(block_assignments)
         total_used_duration = sum(b["total_duration"] for b in block_assignments.values())
         total_available_duration = sum(b["usable_duration"] for b in block_assignments.values())
         utilization_pct = round((total_used_duration / max(1, total_available_duration)) * 100, 1)
 
-        critical_jobs_count = sum(
-            1 for j in jobs
-            if ("Tier 1" in j.get("safety_tier", "") or "Tier 2" in j.get("safety_tier", "") or j.get("is_emergency", False))
-        )
         critical_completed = sum(
             1 for sj in scheduled_jobs_result
-            if ("Tier 1" in job_map[sj["job_id"]].get("safety_tier", "") or
-                "Tier 2" in job_map[sj["job_id"]].get("safety_tier", "") or
+            if ("Tier 1" in str(job_map[sj["job_id"]].get("safety_tier", "")) or
+                "Tier 2" in str(job_map[sj["job_id"]].get("safety_tier", "")) or
                 job_map[sj["job_id"]].get("is_emergency", False))
         )
-
-        # Train Disruption Proxy (0 - 100, lower is better)
-        train_impact = max(5.0, round(30.0 - (total_blocks * 2.5) + (len(deferred_jobs_result) * 2.0), 1))
-
-        # Asset Availability Proxy Score (0 - 100, higher is better)
-        asset_availability = round(min(98.5, 60.0 + (len(scheduled_jobs_result) / max(1, len(jobs))) * 35.0 + (critical_completed / max(1, critical_jobs_count)) * 5.0), 1)
 
         return {
             "solver_status": status_name,
@@ -351,8 +391,8 @@ class CPSATSolver:
             "total_jobs_demanded": len(jobs),
             "total_blocks_count": total_blocks,
             "block_utilization_pct": utilization_pct,
-            "train_impact_score": train_impact,
-            "asset_availability_proxy": asset_availability,
+            "train_impact_score": None,  # Explicitly None: requires live delay telemetry or COA
+            "asset_availability_proxy": utilization_pct,  # Track possession utilization percentage
             "computation_time_ms": round(comp_time, 2),
             "scheduled_jobs": scheduled_jobs_result,
             "deferred_jobs": deferred_jobs_result,

@@ -166,22 +166,28 @@ export default function Header({ onTabChange, activeTab }) {
       return (
         <div className="flex items-center space-x-1.5 text-slate-300">
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-          <span>DATA FEED: <strong className="text-emerald-400 font-bold">LIVE RADAR</strong></span>
+          <span>DATA SOURCE: <strong className="text-white font-semibold">RailRadar</strong></span>
+          <span className="text-slate-600">|</span>
+          <span>TELEMETRY: <strong className="text-emerald-400 font-bold">● LIVE</strong></span>
         </div>
       );
     }
-    if (s === 'CACHED') {
+    if (s === 'CACHED' || s === 'STALE') {
       return (
         <div className="flex items-center space-x-1.5 text-slate-300">
           <span className="w-2 h-2 rounded-full bg-amber-400"></span>
-          <span>DATA FEED: <strong className="text-amber-400 font-bold">CACHED TELEMETRY</strong></span>
+          <span>DATA SOURCE: <strong className="text-white font-semibold">RailRadar</strong></span>
+          <span className="text-slate-600">|</span>
+          <span>TELEMETRY: <strong className="text-amber-400 font-bold">● STALE · 42s</strong></span>
         </div>
       );
     }
     return (
       <div className="flex items-center space-x-1.5 text-slate-300">
-        <span className="w-2 h-2 rounded-full bg-slate-500"></span>
-        <span>DATA FEED: <strong className="text-slate-400 font-semibold">ZERO-MOCK POLICY (OFFLINE)</strong></span>
+        <span className="w-2 h-2 rounded-full bg-rose-500"></span>
+        <span>DATA SOURCE: <strong className="text-white font-semibold">RailRadar</strong></span>
+        <span className="text-slate-600">|</span>
+        <span>TELEMETRY: <strong className="text-rose-400 font-bold">● UNAVAILABLE</strong></span>
       </div>
     );
   };

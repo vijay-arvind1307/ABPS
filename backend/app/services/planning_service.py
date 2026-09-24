@@ -17,12 +17,36 @@ from app.services.train_service import TrainService
 
 class PlanningService:
     @staticmethod
-    def generate_windows(db: Session, corridor_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_windows(db: Session, corridor_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Derives all feasible maintenance windows across railway sections by sweeping train occupancy gaps.
+        Strictly READ-ONLY query of feasible maintenance windows.
+        NEVER mutates or deletes database rows on GET requests.
         """
-        occupancies = TrainService.calculate_all_occupancies(db) or []
+        q = db.query(BlockWindow)
+        if corridor_id:
+            q = q.filter(BlockWindow.corridor_id == corridor_id)
+        existing = q.all()
+        if existing:
+            return [
+                {
+                    "id": w.id,
+                    "window_code": w.window_code,
+                    "section_id": w.section_id,
+                    "corridor_id": w.corridor_id,
+                    "start_min": w.start_min,
+                    "end_min": w.end_min,
+                    "usable_duration_min": w.usable_duration_min,
+                    "train_before_no": w.train_before_no,
+                    "train_after_no": w.train_after_no,
+                    "constraints_applied_json": w.constraints_applied_json,
+                    "feasibility": w.feasibility,
+                    "source": w.source
+                }
+                for w in existing
+            ]
 
+        # If not yet persisted, compute dynamically in-memory without mutating the DB
+        occupancies = TrainService.calculate_all_occupancies(db) or []
         sections = db.query(RailwaySection).all()
         if corridor_id:
             sections = [s for s in sections if s.corridor_id == corridor_id]
@@ -36,15 +60,54 @@ class PlanningService:
                 occupancies=occupancies,
                 horizon_start_min=0,
                 horizon_end_min=1440,
-                min_window_duration_min=30
+                min_window_duration_min=30,
+                has_timetable_data=bool(occupancies)
             )
             for sw in sec_windows:
                 sw["id"] = global_win_id
                 global_win_id += 1
                 all_windows.append(sw)
 
-        # Synchronize into BlockWindow table
-        db.query(BlockWindow).delete()
+        return all_windows
+
+    @staticmethod
+    def generate_windows(db: Session, corridor_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Backwards compatibility alias for get_windows. Strictly read-only."""
+        return PlanningService.get_windows(db, corridor_id)
+
+    @staticmethod
+    def recalculate_windows(db: Session, corridor_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Explicit backend operation to recalculate and synchronize BlockWindow table.
+        MUST only be called from explicit POST recalculation endpoints or workers.
+        """
+        occupancies = TrainService.calculate_all_occupancies(db) or []
+        sections = db.query(RailwaySection).all()
+        if corridor_id:
+            sections = [s for s in sections if s.corridor_id == corridor_id]
+
+        all_windows = []
+        global_win_id = 1
+        for sec in sections:
+            sec_windows = WindowEngine.calculate_feasible_windows(
+                section_id=sec.id,
+                corridor_id=sec.corridor_id,
+                occupancies=occupancies,
+                horizon_start_min=0,
+                horizon_end_min=1440,
+                min_window_duration_min=30,
+                has_timetable_data=bool(occupancies)
+            )
+            for sw in sec_windows:
+                sw["id"] = global_win_id
+                global_win_id += 1
+                all_windows.append(sw)
+
+        # Scoped synchronization into BlockWindow table
+        if corridor_id:
+            db.query(BlockWindow).filter(BlockWindow.corridor_id == corridor_id).delete()
+        else:
+            db.query(BlockWindow).delete()
 
         for w in all_windows:
             bw = BlockWindow(
@@ -63,7 +126,6 @@ class PlanningService:
             )
             db.add(bw)
         db.commit()
-
         return all_windows
 
     @staticmethod
@@ -85,7 +147,7 @@ class PlanningService:
                 detail="Optimization unavailable: Insufficient valid operational data. No maintenance requests available."
             )
 
-        windows = PlanningService.generate_windows(db, corridor_id)
+        windows = PlanningService.get_windows(db, corridor_id)
         if len(windows) == 0:
             raise HTTPException(
                 status_code=400,
@@ -101,6 +163,7 @@ class PlanningService:
                 "department_id": j.department_id,
                 "department_code": j.department.code if j.department else "ENGG",
                 "section_id": j.section_id,
+                "affected_section_ids": j.affected_sections_json if j.affected_sections_json else ([j.section_id] if j.section_id else []),
                 "location_km": j.location_km,
                 "work_type": j.work_type,
                 "criticality": j.criticality,
@@ -143,6 +206,20 @@ class PlanningService:
             enforce_locks=enforce_locks
         )
 
+        # Enforce no invalid plan persistence when solver is INFEASIBLE, MODEL_INVALID, or UNKNOWN
+        if result.get("solver_status") not in ("OPTIMAL", "FEASIBLE"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "NO_FEASIBLE_PLAN",
+                    "solver_status": result.get("solver_status", "INFEASIBLE"),
+                    "message": "Optimization infeasible: no conflict-free window exists for demanded requests under hard safety constraints.",
+                    "blocking_constraints": result.get("blocking_constraints", []),
+                    "deferred_jobs": result.get("deferred_jobs", []),
+                    "explanation": result.get("explanation", "Track possession conflicts with train timetable movements or safety buffers.")
+                }
+            )
+
         # Run Deterministic Safety Validator
         is_valid, errors, warnings = DeterministicSafetyValidator.validate_plan(
             scheduled_jobs=result["scheduled_jobs"],
@@ -151,6 +228,17 @@ class PlanningService:
             resources=resources,
             dependencies=dependencies
         )
+
+        if not is_valid:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "SAFETY_VALIDATION_FAILED",
+                    "message": "Generated schedule failed independent deterministic safety validation.",
+                    "validation_errors": errors,
+                    "validation_warnings": warnings
+                }
+            )
 
         # Save Plan to DB
         plan_code = f"PLAN_{strategy}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"

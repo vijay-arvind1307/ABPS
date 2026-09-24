@@ -78,50 +78,105 @@ class MaintenanceService:
         matched_section_id = job_in.section_id
         matched_corridor_id = None
 
-        # Check for direct section between stations
-        direct_sec = db.query(RailwaySection).filter(
-            or_(
-                (RailwaySection.from_station_id == stn_start.id) & (RailwaySection.to_station_id == stn_end.id),
-                (RailwaySection.from_station_id == stn_end.id) & (RailwaySection.to_station_id == stn_start.id)
-            )
-        ).first()
+        # Phase 3: Exact physical section identification without arbitrary guessing
+        matched_section_id = None
+        matched_corridor_id = None
+        affected_section_ids = []
+        location_status = "CONFIRMED"
 
-        if direct_sec:
-            matched_section_id = direct_sec.id
-            matched_corridor_id = direct_sec.corridor_id
-        elif job_in.corridor_id:
-            specified_corr = db.query(Corridor).filter(Corridor.id == job_in.corridor_id).first()
-            if specified_corr:
-                matched_corridor_id = specified_corr.id
-                corr_secs = db.query(RailwaySection).filter(RailwaySection.corridor_id == specified_corr.id).order_by(RailwaySection.id).all()
-                if corr_secs:
-                    # Look for section matching either start or end station
-                    for cs in corr_secs:
-                        if cs.from_station_id == stn_start.id or cs.to_station_id == stn_end.id:
-                            matched_section_id = cs.id
-                            break
-                    if not matched_section_id:
-                        matched_section_id = corr_secs[0].id
+        if job_in.section_id:
+            specified_sec = db.query(RailwaySection).filter(RailwaySection.id == job_in.section_id).first()
+            if specified_sec:
+                matched_section_id = specified_sec.id
+                matched_corridor_id = specified_sec.corridor_id
+                affected_section_ids = [specified_sec.id]
+        elif job_in.start_station_code and job_in.end_station_code and job_in.start_station_code == job_in.end_station_code:
+            # Single station yard/point work
+            stn_sec = db.query(RailwaySection).filter(
+                or_(
+                    RailwaySection.from_station_id == stn_start.id,
+                    RailwaySection.to_station_id == stn_start.id
+                )
+            ).first()
+            if stn_sec:
+                matched_section_id = stn_sec.id
+                matched_corridor_id = stn_sec.corridor_id
+                affected_section_ids = [stn_sec.id]
         else:
-            # Check for corridor containing both stations
-            corridors = db.query(Corridor).all()
-            for corr in corridors:
-                corr_secs = db.query(RailwaySection).filter(RailwaySection.corridor_id == corr.id).order_by(RailwaySection.id).all()
-                corr_stn_ids = set()
-                for sec in corr_secs:
-                    corr_stn_ids.add(sec.from_station_id)
-                    corr_stn_ids.add(sec.to_station_id)
+            # Check for direct section between stations
+            direct_sec = db.query(RailwaySection).filter(
+                or_(
+                    (RailwaySection.from_station_id == stn_start.id) & (RailwaySection.to_station_id == stn_end.id),
+                    (RailwaySection.from_station_id == stn_end.id) & (RailwaySection.to_station_id == stn_start.id)
+                )
+            ).first()
 
-                if stn_start.id in corr_stn_ids and stn_end.id in corr_stn_ids:
-                    matched_corridor_id = corr.id
-                    matched_section_id = corr_secs[0].id if corr_secs else None
-                    break
+            if direct_sec:
+                matched_section_id = direct_sec.id
+                matched_corridor_id = direct_sec.corridor_id
+                affected_section_ids = [direct_sec.id]
+            else:
+                # Contiguous section path along corridor
+                corr_id = job_in.corridor_id
+                if not corr_id:
+                    cand_corr = db.query(Corridor).all()
+                    for c in cand_corr:
+                        c_secs = db.query(RailwaySection).filter(RailwaySection.corridor_id == c.id).all()
+                        stn_ids = {s.from_station_id for s in c_secs} | {s.to_station_id for s in c_secs}
+                        if stn_start.id in stn_ids and stn_end.id in stn_ids:
+                            corr_id = c.id
+                            break
 
-        if not matched_section_id and not matched_corridor_id:
-            raise HTTPException(
-                status_code=400,
-                detail="ROUTE NOT AVAILABLE / NOT CONFIGURED: No configured railway corridor connects these stations."
-            )
+                if corr_id:
+                    matched_corridor_id = corr_id
+                    corr_secs = db.query(RailwaySection).filter(RailwaySection.corridor_id == corr_id).order_by(RailwaySection.id).all()
+                    import networkx as nx
+                    G = nx.Graph()
+                    for cs in corr_secs:
+                        G.add_edge(cs.from_station_id, cs.to_station_id, section=cs)
+                    try:
+                        if nx.has_path(G, stn_start.id, stn_end.id):
+                            path_nodes = nx.shortest_path(G, stn_start.id, stn_end.id)
+                            path_sec_ids = []
+                            for idx in range(len(path_nodes) - 1):
+                                edge_data = G.get_edge_data(path_nodes[idx], path_nodes[idx + 1])
+                                if edge_data and "section" in edge_data:
+                                    path_sec_ids.append(edge_data["section"].id)
+                            if path_sec_ids:
+                                affected_section_ids = path_sec_ids
+                                matched_section_id = path_sec_ids[0]
+                                location_status = "CONFIRMED"
+                    except Exception:
+                        pass
+
+                if not matched_section_id:
+                    import networkx as nx
+                    G_all = nx.Graph()
+                    all_secs = db.query(RailwaySection).all()
+                    for cs in all_secs:
+                        G_all.add_edge(cs.from_station_id, cs.to_station_id, section=cs)
+                    try:
+                        if nx.has_path(G_all, stn_start.id, stn_end.id):
+                            path_nodes = nx.shortest_path(G_all, stn_start.id, stn_end.id)
+                            path_sec_ids = []
+                            for idx in range(len(path_nodes) - 1):
+                                edge_data = G_all.get_edge_data(path_nodes[idx], path_nodes[idx + 1])
+                                if edge_data and "section" in edge_data:
+                                    path_sec_ids.append(edge_data["section"].id)
+                            if path_sec_ids:
+                                affected_section_ids = path_sec_ids
+                                matched_section_id = path_sec_ids[0]
+                                first_sec = db.query(RailwaySection).filter(RailwaySection.id == matched_section_id).first()
+                                if first_sec:
+                                    matched_corridor_id = first_sec.corridor_id
+                                location_status = "CONFIRMED"
+                    except Exception:
+                        pass
+
+        # STRICT SAFETY RULE: NEVER guess corr_secs[0]!
+        if not matched_section_id:
+            location_status = "LOCATION_REQUIRES_CONFIRMATION"
+            matched_section_id = None
 
         # 3. Deterministic Priority Engine Calculation (Parts 17-23)
         raw_prio = job_in.user_priority or job_in.priority or "MEDIUM"
@@ -189,6 +244,9 @@ class MaintenanceService:
             estimated_duration_min=job_in.estimated_duration_min,
             preferred_start_min=job_in.preferred_start_min,
             preferred_end_min=job_in.preferred_end_min,
+            affected_sections_json=affected_section_ids if affected_section_ids else None,
+            location_status=location_status,
+            version_number=1,
             status=req_status,
             is_emergency=job_in.is_emergency,
             created_by_id=user.id,
@@ -211,12 +269,26 @@ class MaintenanceService:
     def update_job(db: Session, job_id: int, job_update: MaintenanceJobUpdate, user: User) -> MaintenanceJob:
         job = MaintenanceService.get_job_by_id(db, job_id)
 
-        # Enforce RBAC: department_user can only update their own department's jobs
-        if user.role == "department_user":
+        # Enforce RBAC: department users can only update their own department's jobs
+        user_role = (user.role or "").upper()
+        dept_roles = {"DEPARTMENT_USER", "TRACK_ENGINEERING", "SIGNAL_TELECOM", "TRACTION_DISTRIBUTION"}
+        if user_role in dept_roles:
             if user.department_id != job.department_id:
                 raise HTTPException(status_code=403, detail="Department users can only edit requests in their own department.")
             if job_update.status in ("APPROVED", "REJECTED", "SCHEDULED"):
-                raise HTTPException(status_code=403, detail="Department users are not authorized to approve or schedule requests.")
+                raise HTTPException(status_code=403, detail="Department users are not authorized to approve, reject, or schedule requests.")
+            if job.status not in ("DRAFT", "SUBMITTED"):
+                raise HTTPException(status_code=403, detail=f"Request cannot be modified in '{job.status}' state.")
+
+        # Optimistic Concurrency Control (Phase 16)
+        if hasattr(job_update, "version_number") and job_update.version_number is not None:
+            if job_update.version_number != job.version_number:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Conflict: Maintenance request {job.job_code} was modified by another user (current version: {job.version_number}, your version: {job_update.version_number}). Please refresh."
+                )
+
+        job.version_number = (job.version_number or 1) + 1
 
         update_data = job_update.model_dump(exclude_unset=True)
 

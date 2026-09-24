@@ -124,7 +124,7 @@ def seed_database(db: Session, drop_all: bool = False):
 
     # 4. Seed Master Corridors (Canonical Southern Railway + Isolated Fixtures)
     corridors_data = [
-        {"corridor_id": "CORR_MDU_TEN", "name": "Madurai - Tirunelveli Main Line", "division": "Madurai (MDU)", "zone": "Southern Railway (SR)", "start": "MDU", "end": "TEN", "distance": 189.5, "status": "ACTIVE"},
+        {"corridor_id": "CORR_C40_MDU_TEN", "prototype_code": "C40", "name": "Madurai - Tirunelveli Main Line", "division": "Madurai (MDU)", "zone": "Southern Railway (SR)", "start": "MDU", "end": "TEN", "distance": 154.9, "status": "ACTIVE"},
         {"corridor_id": "CORR_MAS_TPJ", "name": "Chennai Central - Tiruchchirappalli Main Line", "division": "SR Joint (MAS/TPJ)", "zone": "Southern Railway (SR)", "start": "MAS", "end": "TPJ", "distance": 330.1, "status": "ACTIVE"},
         {"corridor_id": "CORR_MAS_CBE", "name": "Chennai Central - Coimbatore Trunk Corridor", "division": "SR Joint (MAS/SA)", "zone": "Southern Railway (SR)", "start": "MAS", "end": "CBE", "distance": 311.4, "status": "ACTIVE"},
         {"corridor_id": "CORR_CBE_SA", "name": "Coimbatore - Salem Main Line", "division": "Salem (SA)", "zone": "Southern Railway (SR)", "start": "CBE", "end": "SA", "distance": 155.0, "status": "ACTIVE"},
@@ -142,6 +142,7 @@ def seed_database(db: Session, drop_all: bool = False):
         if not corr:
             corr = Corridor(
                 corridor_id=c["corridor_id"],
+                prototype_code=c.get("prototype_code"),
                 name=c["name"],
                 division=c["division"],
                 zone=c["zone"],
@@ -154,6 +155,8 @@ def seed_database(db: Session, drop_all: bool = False):
             db.commit()
             db.refresh(corr)
         else:
+            if c.get("prototype_code"):
+                corr.prototype_code = c["prototype_code"]
             corr.name = c["name"]
             corr.division = c["division"]
             corr.zone = c["zone"]
@@ -180,12 +183,16 @@ def seed_database(db: Session, drop_all: bool = False):
                 if not from_stn or not to_stn:
                     continue
                 
-                # Check for specific MDU-TEN legacy sections
-                mdu_ten_canonical = {"SEC_MDU_TDN", "SEC_TDN_TMQ", "SEC_TMQ_VPT", "SEC_VPT_SRT", "SEC_SRT_CVP", "SEC_CVP_KDU", "SEC_KDU_MEJ", "SEC_MEJ_TEN", "SEC_MEJ_TN"}
-                if sec_id in mdu_ten_canonical and "CORR_MDU_TEN" in corr_map:
-                    cid = corr_map["CORR_MDU_TEN"].id
+                # Check for specific MDU-TEN canonical sections -> always link to C40 (CORR_C40_MDU_TEN)
+                mdu_ten_canonical = {"SEC_MDU_TDN", "SEC_TDN_TMQ", "SEC_TMQ_VPT", "SEC_VPT_SRT", "SEC_SRT_CVP", "SEC_CVP_KDU", "SEC_KDU_MEJ", "SEC_MEJ_TEN"}
+                c40_corr = db.query(Corridor).filter(Corridor.prototype_code == "C40").first() or corr_map.get("CORR_C40_MDU_TEN")
+                if sec_id in mdu_ten_canonical and c40_corr:
+                    cid = c40_corr.id
+                elif sec_id == "SEC_MEJ_TN":
+                    c41_corr = db.query(Corridor).filter(Corridor.prototype_code == "C41").first() or corr_map.get("CORR_C41_MEJ_TN")
+                    cid = c41_corr.id if c41_corr else 56
                 elif s_data.get("prototype_code") == "TRUNK" or s_data.get("corridor_id") == "CORR_SR_TRUNK":
-                    cid = corr_map.get("CORR_MAS_TPJ", corr_map.get("CORR_MAS_CBE", corr_map["CORR_MDU_TEN"])).id
+                    cid = corr_map.get("CORR_MAS_TPJ", corr_map.get("CORR_MAS_CBE", c40_corr)).id
                 else:
                     c_found = db.query(Corridor).filter(
                         (Corridor.prototype_code == s_data.get("prototype_code")) |
@@ -194,7 +201,7 @@ def seed_database(db: Session, drop_all: bool = False):
                     if c_found:
                         cid = c_found.id
                     else:
-                        cid = corr_map.get(s_data.get("corridor_id"), corr_map.get("CORR_C40_MDU_TEN", corr_map.get("CORR_MDU_TEN"))).id
+                        cid = corr_map.get(s_data.get("corridor_id"), c40_corr).id
 
                 sec = db.query(RailwaySection).filter(RailwaySection.section_id == sec_id).first()
                 if not sec:

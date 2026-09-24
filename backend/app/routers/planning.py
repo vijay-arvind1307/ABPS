@@ -20,8 +20,21 @@ router = APIRouter(prefix="/planning", tags=["Block Planning & Optimization"])
 
 @router.get("/windows", response_model=List[BlockWindowResponse])
 def get_windows(corridor_id: Optional[int] = None, db: Session = Depends(get_db)):
-    """Derives feasible maintenance windows via interval sweep-line algorithm."""
-    return PlanningService.generate_windows(db, corridor_id)
+    """Strictly read-only retrieval of feasible maintenance windows."""
+    return PlanningService.get_windows(db, corridor_id)
+
+
+@router.post("/windows/recalculate", response_model=List[BlockWindowResponse])
+def recalculate_windows(
+    corridor_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["railway_planner", "admin"]))
+):
+    """
+    Explicit backend operation to recalculate and synchronize feasible maintenance windows.
+    Strictly restricted to authorized planners. Never mutates database on GET.
+    """
+    return PlanningService.recalculate_windows(db, corridor_id)
 
 
 @router.post("/optimize", response_model=BlockPlanResponse)
@@ -90,6 +103,9 @@ def validate_plan(id: int, db: Session = Depends(get_db)):
             "job_id": pj.job_id,
             "job_code": pj.job.job_code if pj.job else f"JOB_{pj.job_id}",
             "section_id": pj.job.section_id if pj.job else 1,
+            "affected_section_ids": pj.job.affected_sections_json if (pj.job and pj.job.affected_sections_json) else ([pj.job.section_id] if (pj.job and pj.job.section_id) else []),
+            "work_type": pj.job.work_type if pj.job else None,
+            "department_code": pj.job.department.code if (pj.job and pj.job.department) else None,
             "window_id": pj.window_id,
             "scheduled_start_min": pj.scheduled_start_min,
             "scheduled_end_min": pj.scheduled_end_min,
@@ -133,9 +149,22 @@ def approve_plan(
         raise HTTPException(status_code=404, detail="Plan not found")
 
     if approval_req.action == "APPROVE":
+        if plan.validation_status != "VALID":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot approve plan: Safety validation status is '{plan.validation_status}'. Only independently validated VALID plans may be approved."
+            )
+        if plan.solver_status not in ("OPTIMAL", "FEASIBLE"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot approve plan: Solver status is '{plan.solver_status}'. Infeasible schedules cannot be approved."
+            )
+
         plan.approval_status = "APPROVED"
         plan.approved_by_id = current_user.id
         plan.approved_at = datetime.utcnow()
+        plan.decision_reason = approval_req.reason or "Authorized by Railway Planner"
+        plan.version = (plan.version or 1) + 1
 
         # Atomically transition all scheduled jobs in the plan to APPROVED and notify departments
         for pj in plan.plan_jobs:

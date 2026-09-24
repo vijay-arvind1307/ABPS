@@ -20,9 +20,18 @@ def setup_test_db():
 
     db = SessionLocal()
     try:
+        from app.models.models import PlanVersion, WhatIfScenario, TrainSectionOccupancy, TrainPositionSnapshot, TrainTrip, ExecutionRecord
+        db.query(ExecutionRecord).delete()
+        db.query(PlanJob).delete()
+        db.query(PlanVersion).delete()
+        db.query(WhatIfScenario).delete()
+        db.query(BlockPlan).update({"superseded_by_plan_id": None})
         db.query(BlockPlan).delete()
         db.query(MaintenanceJobResource).delete()
         db.query(MaintenanceJob).delete()
+        db.query(TrainSectionOccupancy).filter(TrainSectionOccupancy.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
+        db.query(TrainPositionSnapshot).filter(TrainPositionSnapshot.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
+        db.query(TrainTrip).filter(TrainTrip.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db.query(TrainRouteStop).filter(TrainRouteStop.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db.query(TrainMovement).filter(TrainMovement.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db.query(Train).filter(Train.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
@@ -83,10 +92,15 @@ def setup_test_db():
         dept_snt = db.query(Department).filter(Department.code == "SNT").first()
         dept_trd = db.query(Department).filter(Department.code == "TRD").first()
 
+        test_sec = db.query(RailwaySection).first()
+        target_sec_id = test_sec.id if test_sec else 1
+        target_corr_id = test_sec.corridor_id if test_sec else 1
+
         j1 = MaintenanceJob(
             job_code="TEST_ENGG_01",
             department_id=dept_engg.id,
-            section_id=2,
+            section_id=target_sec_id,
+            corridor_id=target_corr_id,
             location_km=42.0,
             work_type="TRACK_TAMPING",
             description="Test Track Tamping",
@@ -102,7 +116,8 @@ def setup_test_db():
         j2 = MaintenanceJob(
             job_code="TEST_SNT_01",
             department_id=dept_snt.id,
-            section_id=2,
+            section_id=target_sec_id,
+            corridor_id=target_corr_id,
             location_km=42.5,
             work_type="SIGNAL_POINT_OVERHAUL",
             description="Test Point Overhaul",
@@ -118,7 +133,8 @@ def setup_test_db():
         j3 = MaintenanceJob(
             job_code="TEST_TRD_01",
             department_id=dept_trd.id,
-            section_id=2,
+            section_id=target_sec_id,
+            corridor_id=target_corr_id,
             location_km=42.8,
             work_type="OHE_INSPECTION",
             description="Test OHE Inspection",
@@ -138,10 +154,18 @@ def setup_test_db():
     yield
     db_clean = SessionLocal()
     try:
+        from app.models.models import PlanVersion, WhatIfScenario, TrainSectionOccupancy, TrainPositionSnapshot, TrainTrip, ExecutionRecord
+        db_clean.query(ExecutionRecord).delete()
         db_clean.query(PlanJob).delete()
+        db_clean.query(PlanVersion).delete()
+        db_clean.query(WhatIfScenario).delete()
+        db_clean.query(BlockPlan).update({"superseded_by_plan_id": None})
         db_clean.query(BlockPlan).delete()
         db_clean.query(MaintenanceJobResource).delete()
         db_clean.query(MaintenanceJob).delete()
+        db_clean.query(TrainSectionOccupancy).filter(TrainSectionOccupancy.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
+        db_clean.query(TrainPositionSnapshot).filter(TrainPositionSnapshot.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
+        db_clean.query(TrainTrip).filter(TrainTrip.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db_clean.query(TrainRouteStop).filter(TrainRouteStop.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db_clean.query(TrainMovement).filter(TrainMovement.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db_clean.query(Train).filter(Train.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)

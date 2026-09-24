@@ -2,7 +2,7 @@ from datetime import datetime
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, JSON, Enum
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, synonym
 from app.db.base import Base
 
 
@@ -38,20 +38,22 @@ class User(Base):
     department = relationship("Department", back_populates="users")
 
 
-class RailwayStation(Base):
-    __tablename__ = "railway_stations"
+class Station(Base):
+    __tablename__ = "stations"
 
     id = Column(Integer, primary_key=True, index=True)
-    station_code = Column(String(10), unique=True, index=True, nullable=False)
-    station_name = Column(String(150), nullable=False)
-    normalized_station_name = Column(String(150), index=True, nullable=False)
-    state = Column(String(50), index=True, nullable=False)
+    code = Column(String(10), unique=True, index=True, nullable=False)  # NDLS, MDU, VPT, TEN
+    name = Column(String(150), nullable=False)
+    normalized_name = Column(String(150), index=True, nullable=True)
+    division = Column(String(50), nullable=True, default="MAS")
+    zone = Column(String(50), nullable=True, default="SR")
+    state = Column(String(50), index=True, nullable=True, default="Tamil Nadu")
     district = Column(String(100), nullable=True)
-    division = Column(String(20), index=True, nullable=False)
-    category = Column(String(20), nullable=False)
-    station_type = Column(String(30), nullable=True)  # TERMINAL, JUNCTION, REGULAR, FLAG, HALT
+    category = Column(String(50), nullable=True, default="NSG")
+    station_type = Column(String(30), nullable=True, default="REGULAR")  # TERMINAL, JUNCTION, REGULAR, FLAG, HALT
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
+    total_platforms = Column(Integer, default=2)
     is_active = Column(Boolean, default=True)
     source = Column(String(150), default="Southern Railway Station List (01.04.2025)")
     source_version = Column(String(50), default="01.04.2025")
@@ -59,26 +61,21 @@ class RailwayStation(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    station_code = synonym("code")
+    station_name = synonym("name")
+    normalized_station_name = synonym("normalized_name")
 
-class Station(Base):
-    __tablename__ = "stations"
 
-    id = Column(Integer, primary_key=True, index=True)
-    code = Column(String(10), unique=True, index=True, nullable=False)  # NDLS, GZB, CNB, PRYJ, DDU
-    name = Column(String(100), nullable=False)
-    division = Column(String(50), nullable=False)
-    zone = Column(String(20), nullable=False)
-    latitude = Column(Float, nullable=False)
-    longitude = Column(Float, nullable=False)
-    total_platforms = Column(Integer, default=4)
+# Compatibility alias: RailwayStation references the canonical Station model
+RailwayStation = Station
 
 
 class Corridor(Base):
     __tablename__ = "corridors"
 
     id = Column(Integer, primary_key=True, index=True)
-    corridor_id = Column(String(30), unique=True, index=True, nullable=False)  # e.g. C01, CORR_MDU_TEN
-    prototype_code = Column(String(10), nullable=True, index=True)  # C01, C02, ..., C20
+    corridor_id = Column(String(30), unique=True, index=True, nullable=False)  # e.g. C01, C40
+    prototype_code = Column(String(10), nullable=True, index=True)  # C01, C02, ..., C46
     name = Column(String(150), nullable=False)
     division = Column(String(50), nullable=False)
     zone = Column(String(50), nullable=False)
@@ -95,15 +92,18 @@ class RailwaySection(Base):
     __tablename__ = "railway_sections"
 
     id = Column(Integer, primary_key=True, index=True)
-    section_id = Column(String(30), unique=True, index=True, nullable=False)  # SEC_NDLS_GZB_UP
+    section_id = Column(String(30), unique=True, index=True, nullable=False)  # SEC_MDU_VPT_UP
     name = Column(String(150), nullable=False)
     corridor_id = Column(Integer, ForeignKey("corridors.id"), nullable=False)
     from_station_id = Column(Integer, ForeignKey("stations.id"), nullable=False)
     to_station_id = Column(Integer, ForeignKey("stations.id"), nullable=False)
+    from_station_code = Column(String(10), nullable=True)
+    to_station_code = Column(String(10), nullable=True)
     length_km = Column(Float, nullable=False)
-    track_type = Column(String(20), default="DOUBLE_UP")  # SINGLE, DOUBLE_UP, DOUBLE_DN, QUAD_UP1, QUAD_DN1
+    track_type = Column(String(20), default="DOUBLE_UP")  # SINGLE, DOUBLE_UP, DOUBLE_DN, QUAD_UP1
     direction = Column(String(10), default="UP")  # UP, DOWN, BOTH
-    max_speed_kmh = Column(Float, default=130.0)
+    line_type = Column(String(20), default="DOUBLE")  # SINGLE, DOUBLE, MULTIPLE
+    max_speed_kmh = Column(Float, default=110.0)
     is_electrified = Column(Boolean, default=True)
     geometry_geojson = Column(JSON, nullable=True)  # List of coordinates or GeoJSON
 
@@ -211,20 +211,41 @@ class TrainMovement(Base):
     current_section = relationship("RailwaySection", foreign_keys=[current_section_id])
 
 
+class TrainTrip(Base):
+    __tablename__ = "train_trips"
+
+    id = Column(Integer, primary_key=True, index=True)
+    trip_id = Column(String(50), unique=True, index=True, nullable=False)
+    train_number = Column(String(20), ForeignKey("trains.train_number"), index=True, nullable=False)
+    journey_date = Column(DateTime, index=True, nullable=False)
+    operational_status = Column(String(30), default="SCHEDULED")  # SCHEDULED, RUNNING, CANCELLED, DIVERTED, COMPLETED
+    delay_minutes = Column(Integer, default=0)
+    current_station_code = Column(String(10), nullable=True)
+    source = Column(String(50), default="TIMETABLE")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    train = relationship("Train")
+
+
 class TrainSectionOccupancy(Base):
     __tablename__ = "train_section_occupancies"
 
     id = Column(Integer, primary_key=True, index=True)
     train_number = Column(String(20), ForeignKey("trains.train_number"), nullable=False)
+    trip_id = Column(String(50), nullable=True, index=True)
     section_id = Column(Integer, ForeignKey("railway_sections.id"), nullable=False)
-    journey_date = Column(DateTime, nullable=True)
+    journey_date = Column(DateTime, nullable=True, index=True)
+    direction = Column(String(10), default="UP")  # UP, DOWN
     entry_time = Column(DateTime, nullable=True)
     exit_time = Column(DateTime, nullable=True)
     estimated_entry_min = Column(Integer, nullable=False)
     estimated_exit_min = Column(Integer, nullable=False)
+    traversal_duration_min = Column(Integer, default=0)
     confidence = Column(Float, default=0.95)
     is_live = Column(Boolean, default=False)
-    source = Column(String(30), default="calculated")  # SCHEDULED, LIVE, ESTIMATED, UNAVAILABLE
+    data_quality_state = Column(String(50), default="AUTHORITATIVE_WTT")  # AUTHORITATIVE_WTT, INTERPOLATED, LIVE_ANCHORED, INSUFFICIENT_DATA
+    source = Column(String(50), default="calculated")  # SCHEDULED, LIVE, ESTIMATED, UNAVAILABLE
     last_updated = Column(DateTime, default=datetime.utcnow)
     calculated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -333,6 +354,17 @@ class MaintenanceJob(Base):
     preferred_start_min = Column(Integer, nullable=True)
     preferred_end_min = Column(Integer, nullable=True)
     status = Column(String(30), default="SUBMITTED")  # DRAFT, SUBMITTED, UNDER_REVIEW, OPTIMIZING, RECOMMENDED, APPROVED, MODIFICATION_REQUESTED, REJECTED, ACCEPTED, IN_PROGRESS, COMPLETED, CANCELLED
+
+    # Multi-section & Concurrency Control
+    version_number = Column(Integer, default=1, nullable=False)
+    affected_sections_json = Column(JSON, nullable=True)  # List of affected section IDs
+    possession_type = Column(String(50), default="ABSOLUTE")  # ABSOLUTE, POWER_BLOCK, SNT_DISCONNECTION, CAUTION_ORDER
+    location_status = Column(String(50), default="VERIFIED")  # VERIFIED, LOCATION_REQUIRES_CONFIRMATION
+
+    # Structured engineering inputs
+    asset_condition_score = Column(Float, nullable=True)
+    failure_consequence_score = Column(Float, nullable=True)
+    operational_importance_score = Column(Float, nullable=True)
 
     is_emergency = Column(Boolean, default=False)
     is_locked = Column(Boolean, default=False)
@@ -469,15 +501,22 @@ class BlockPlan(Base):
     asset_availability_proxy = Column(Float, default=0.0)
     computation_time_ms = Column(Float, default=0.0)
 
-    validation_status = Column(String(20), default="VALID")  # VALID, INVALID, UNCHECKED
+    validation_status = Column(String(50), default="VALID")  # VALID, INVALID, DATA_INSUFFICIENT_FOR_VALIDATION
     validation_errors_json = Column(JSON, nullable=True)
+    validation_warnings_json = Column(JSON, nullable=True)
 
-    approval_status = Column(String(30), default="DRAFT")  # DRAFT, PROPOSED, APPROVED, REJECTED
+    approval_status = Column(String(30), default="DRAFT")  # DRAFT, PROPOSED, APPROVED, COMMITTED, REJECTED, SUPERSEDED, CLOSED
     approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime, nullable=True)
     rejection_reason = Column(Text, nullable=True)
+    decision_reason = Column(Text, nullable=True)
+    superseded_by_plan_id = Column(Integer, ForeignKey("block_plans.id"), nullable=True)
 
-    version = Column(Integer, default=1)
+    data_quality_status = Column(String(50), default="VERIFIED")
+    asset_availability_pct = Column(Float, nullable=True)
+    train_disruption_impact = Column(Float, nullable=True)
+
+    version = Column(Integer, default=1, nullable=False)
     is_active = Column(Boolean, default=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -485,6 +524,7 @@ class BlockPlan(Base):
     plan_jobs = relationship("PlanJob", back_populates="plan", cascade="all, delete-orphan")
     approved_by = relationship("User", foreign_keys=[approved_by_id])
     created_by = relationship("User", foreign_keys=[created_by_id])
+    superseded_by = relationship("BlockPlan", remote_side=[id])
 
 
 class CoordinatedBlockPlan(Base):
@@ -677,4 +717,21 @@ class APIHealthStatus(Base):
     failure_reason = Column(Text, nullable=True)
     retry_after = Column(DateTime, nullable=True)
     checked_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SystemAlert(Base):
+    __tablename__ = "system_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    alert_type = Column(String(50), index=True, nullable=False)  # DISTURBANCE, TIMEOUT, CONFLICT, RATE_LIMITED, INFEASIBLE
+    severity = Column(String(20), default="WARNING")  # INFO, WARNING, CRITICAL
+    title = Column(String(150), nullable=False)
+    message = Column(Text, nullable=False)
+    entity_type = Column(String(50), nullable=True)
+    entity_id = Column(String(50), nullable=True)
+    is_resolved = Column(Boolean, default=False)
+    resolved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    resolved_by = relationship("User", foreign_keys=[resolved_by_id])
 

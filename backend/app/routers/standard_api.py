@@ -451,12 +451,16 @@ def run_optimization(
 
     # Persist plans
     today_str = datetime.utcnow().strftime("%Y%m%d")
-    count_today = db.query(CoordinatedBlockPlan).count()
+    base_count = db.query(CoordinatedBlockPlan).count()
     persisted_plans = []
 
     for plan_dict in pool_result["plans"]:
-        count_today += 1
-        plan_code = f"CBP-{today_str}-{count_today:03d}"
+        base_count += 1
+        candidate_code = f"CBP-{today_str}-{base_count:03d}"
+        while db.query(CoordinatedBlockPlan).filter(CoordinatedBlockPlan.plan_code == candidate_code).first():
+            base_count += 1
+            candidate_code = f"CBP-{today_str}-{base_count:03d}"
+        plan_code = candidate_code
 
         plan_entity = CoordinatedBlockPlan(
             plan_code=plan_code,

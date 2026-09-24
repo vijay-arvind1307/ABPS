@@ -106,6 +106,7 @@ export const overrideJobPriority = (id, data) => api.post(`/maintenance/requests
 
 // Planning & Optimization Endpoints
 export const getWindows = (corridorId) => api.get('/planning/windows', { params: { corridor_id: corridorId } });
+export const recalculateWindows = (corridorId) => api.post('/planning/windows/recalculate', null, { params: corridorId ? { corridor_id: corridorId } : {} });
 export const runOptimization = (data) => api.post('/planning/optimize', data);
 export const getActivePlan = (strategy = 'PLAN_A') => api.get('/planning/plans/active', { params: { strategy } });
 export const getPlanById = (id) => api.get(`/planning/plans/${id}`);

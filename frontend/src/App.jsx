@@ -69,7 +69,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#F4F6F9]">
+    <div className={`flex flex-col bg-[#F4F6F9] ${activeTab === 'planner-dashboard' ? 'h-screen max-h-screen overflow-hidden' : 'min-h-screen'}`}>
       <Header
         activeTab={activeTab}
         onTabChange={setActiveTab}
@@ -78,19 +78,21 @@ export default function App() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
       />
-      <main className="flex-1 overflow-y-auto">
+      <main className={`flex-1 ${activeTab === 'planner-dashboard' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto'}`}>
         <ErrorBoundary variant="page">
           {renderActiveScreen()}
         </ErrorBoundary>
       </main>
-      <footer className="bg-[#0B2545] text-slate-400 text-[11px] py-2 px-4 border-t border-slate-700 flex flex-wrap justify-between items-center">
-        <div className="font-semibold text-slate-300">
-          INDIAN RAILWAYS — RAILWAY MAINTENANCE BLOCK PLANNING SYSTEM (IR-ABPS)
-        </div>
-        <div className="font-mono text-slate-400">
-          Decision Support & Constraint Optimization Engine | Not for direct operational control
-        </div>
-      </footer>
+      {activeTab !== 'planner-dashboard' && (
+        <footer className="bg-[#0B2545] text-slate-400 text-[11px] py-2 px-4 border-t border-slate-700 flex flex-wrap justify-between items-center">
+          <div className="font-semibold text-slate-300">
+            INDIAN RAILWAYS — RAILWAY MAINTENANCE BLOCK PLANNING SYSTEM (IR-ABPS)
+          </div>
+          <div className="font-mono text-slate-400">
+            Decision Support & Constraint Optimization Engine | Not for direct operational control
+          </div>
+        </footer>
+      )}
     </div>
   );
 }

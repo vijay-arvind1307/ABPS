@@ -58,28 +58,25 @@ def migrate():
                     s.corridor_id = target_corr_id
                     print(f"Remapped {sec_id} to corridor ID {target_corr_id}")
 
-        # 4. Remove mock sections SECTION-103 and SECTION-204
+        # 4. Remove mock sections SECTION-103 and SECTION-204 and their child references
+        from app.models.models import BlockWindow, TrainSectionOccupancy, TrainRoute, CoordinatedBlockPlan
         mock_secs = db.query(RailwaySection).filter(
             RailwaySection.section_id.in_(['SECTION-103', 'SECTION-204'])
         ).all()
+        mock_sec_ids = [ms.id for ms in mock_secs]
+        if mock_sec_ids:
+            db.query(BlockWindow).filter(BlockWindow.section_id.in_(mock_sec_ids)).delete(synchronize_session=False)
+            db.query(TrainSectionOccupancy).filter(TrainSectionOccupancy.section_id.in_(mock_sec_ids)).delete(synchronize_session=False)
+            db.query(TrainRoute).filter(TrainRoute.section_id.in_(mock_sec_ids)).delete(synchronize_session=False)
+            db.query(CoordinatedBlockPlan).filter(CoordinatedBlockPlan.section_id.in_(mock_sec_ids)).delete(synchronize_session=False)
         for ms in mock_secs:
             print(f"Deleting mock section {ms.section_id} (ID: {ms.id})")
             db.delete(ms)
 
         db.commit()
 
-        # 5. Delete empty legacy corridors (prototype_code is None)
-        legacy_corrs = db.query(Corridor).filter(Corridor.prototype_code == None).all()
-        for lc in legacy_corrs:
-            sec_count = db.query(RailwaySection).filter(RailwaySection.corridor_id == lc.id).count()
-            if sec_count == 0:
-                print(f"Deleting empty legacy corridor {lc.id} ({lc.name})")
-                db.delete(lc)
-            else:
-                print(f"Legacy corridor {lc.id} ({lc.name}) still has {sec_count} sections, keeping")
-
-        db.commit()
-        print("Migration committed successfully.")
+        # 5. Keep legacy corridors intact to preserve foreign keys
+        print("Mock sections removed and C40 physical sections committed.")
 
         # Verification
         c40_now = db.query(RailwaySection).filter(RailwaySection.corridor_id == c40.id).all()

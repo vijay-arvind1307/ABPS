@@ -26,6 +26,14 @@ class DeterministicSafetyValidator:
         job_map = {j["job_id"]: j for j in scheduled_jobs}
 
         # ----------------------------------------------------
+        # RULE 0: DATA SUFFICIENCY CHECK (Never certify safe without data)
+        # ----------------------------------------------------
+        if not occupancies:
+            errors.append(
+                "DATA_INSUFFICIENT_FOR_VALIDATION: Train timetable occupancy data is missing. Cannot certify section safety."
+            )
+
+        # ----------------------------------------------------
         # RULE 1: TRAIN CONFLICT DETECTION (Absolute Hard Invariant)
         # ----------------------------------------------------
         for sj in scheduled_jobs:
@@ -33,33 +41,34 @@ class DeterministicSafetyValidator:
                 continue
 
             j_code = sj.get("job_code", f"JOB_{sj['job_id']}")
-            j_sec = sj["section_id"]
+            sec_ids = sj.get("affected_section_ids") or [sj["section_id"]]
             s_start = sj["scheduled_start_min"]
             s_end = sj["scheduled_end_min"]
 
-            # Check against all train occupancies on the same section
-            for occ in occupancies:
-                if occ["section_id"] == j_sec:
-                    t_entry = occ["estimated_entry_min"]
-                    t_exit = occ["estimated_exit_min"]
-                    t_no = occ["train_number"]
+            # Check across all affected physical sections
+            for j_sec in sec_ids:
+                for occ in occupancies:
+                    if occ["section_id"] == j_sec:
+                        t_entry = occ["estimated_entry_min"]
+                        t_exit = occ["estimated_exit_min"]
+                        t_no = occ["train_number"]
 
-                    # Check strict overlap between [s_start, s_end] and [t_entry, t_exit]
-                    if max(s_start, t_entry) < min(s_end, t_exit):
-                        overlap_min = min(s_end, t_exit) - max(s_start, t_entry)
-                        errors.append(
-                            f"CRITICAL SAFETY VIOLATION: Maintenance job {j_code} on Section {j_sec} overlaps Train {t_no} occupancy by {overlap_min} minutes (Job: {s_start}-{s_end}, Train: {t_entry}-{t_exit})."
-                        )
+                        # Check strict overlap between [s_start, s_end] and [t_entry, t_exit]
+                        if max(s_start, t_entry) < min(s_end, t_exit):
+                            overlap_min = min(s_end, t_exit) - max(s_start, t_entry)
+                            errors.append(
+                                f"CRITICAL SAFETY VIOLATION: Maintenance job {j_code} on Section {j_sec} overlaps Train {t_no} occupancy by {overlap_min} minutes (Job: {s_start}-{s_end}, Train: {t_entry}-{t_exit})."
+                            )
 
-                    # Check safety buffer compliance
-                    elif s_start < t_entry and (t_entry - s_end) < buffer_after_min:
-                        errors.append(
-                            f"BUFFER VIOLATION: Job {j_code} ends at {s_end}min, leaving only {t_entry - s_end}min buffer before Train {t_no} entry (minimum required: {buffer_after_min}min)."
-                        )
-                    elif t_exit < s_start and (s_start - t_exit) < buffer_before_min:
-                        errors.append(
-                            f"BUFFER VIOLATION: Job {j_code} starts at {s_start}min, leaving only {s_start - t_exit}min buffer after Train {t_no} exit (minimum required: {buffer_before_min}min)."
-                        )
+                        # Check safety buffer compliance
+                        elif s_start < t_entry and (t_entry - s_end) < buffer_after_min:
+                            errors.append(
+                                f"BUFFER VIOLATION: Job {j_code} ends at {s_end}min, leaving only {t_entry - s_end}min buffer before Train {t_no} entry (minimum required: {buffer_after_min}min)."
+                            )
+                        elif t_exit < s_start and (s_start - t_exit) < buffer_before_min:
+                            errors.append(
+                                f"BUFFER VIOLATION: Job {j_code} starts at {s_start}min, leaving only {s_start - t_exit}min buffer after Train {t_no} exit (minimum required: {buffer_before_min}min)."
+                            )
 
         # ----------------------------------------------------
         # RULE 2: WINDOW BOUNDARY & CAPACITY CONSTRAINTS
@@ -89,8 +98,16 @@ class DeterministicSafetyValidator:
             if (s_end - s_start) != s_dur:
                 errors.append(f"DURATION MISMATCH: Job {j_code} scheduled span ({s_end - s_start}m) does not match required duration ({s_dur}m).")
 
-            if w["section_id"] != sj["section_id"]:
-                errors.append(f"SECTION MISMATCH: Job {j_code} requires Section {sj['section_id']} but Window is on Section {w['section_id']}.")
+            job_sec = sj.get("section_id")
+            aff_secs = set(sj.get("affected_section_ids") or [])
+            if job_sec:
+                aff_secs.add(job_sec)
+            win_secs = set(w.get("section_ids") or ([w["section_id"]] if w.get("section_id") else []))
+
+            if aff_secs and win_secs and not (aff_secs & win_secs):
+                errors.append(f"SECTION MISMATCH: Job {j_code} requires Section {job_sec} but Window is on Section {w['section_id']}.")
+            elif not aff_secs and job_sec != w["section_id"]:
+                errors.append(f"SECTION MISMATCH: Job {j_code} requires Section {job_sec} but Window is on Section {w['section_id']}.")
 
         # ----------------------------------------------------
         # RULE 3: LOCKED PLANNER DECISION PRESERVATION
@@ -146,6 +163,32 @@ class DeterministicSafetyValidator:
                                         f"RESOURCE OVERALLOCATION: Resource '{res['name']}' capacity ({cap}) exceeded at minute {m} by concurrent jobs."
                                     )
                                     break
+
+        # ----------------------------------------------------
+        # RULE 6: CROSS-DEPARTMENT PARALLEL WORK COMPATIBILITY
+        # ----------------------------------------------------
+        from app.algorithms.coordination import CompatibilityEngine
+        sched_active = [sj for sj in scheduled_jobs if sj.get("is_scheduled")]
+        n_sched = len(sched_active)
+        for i in range(n_sched):
+            for j in range(i + 1, n_sched):
+                j1 = sched_active[i]
+                j2 = sched_active[j]
+                s1, e1 = j1["scheduled_start_min"], j1["scheduled_end_min"]
+                s2, e2 = j2["scheduled_start_min"], j2["scheduled_end_min"]
+                if max(s1, s2) < min(e1, e2):
+                    sec1_set = set(j1.get("affected_section_ids") or [j1["section_id"]])
+                    sec2_set = set(j2.get("affected_section_ids") or [j2["section_id"]])
+                    if sec1_set & sec2_set:
+                        wt1 = str(j1.get("work_type", "")).upper()
+                        wt2 = str(j2.get("work_type", "")).upper()
+                        pair1 = (wt1, wt2)
+                        pair2 = (wt2, wt1)
+                        both_insp = ("INSPECTION" in wt1 and "INSPECTION" in wt2)
+                        if not both_insp and pair1 not in CompatibilityEngine.PARALLEL_COMPATIBLE_WORK_TYPES and pair2 not in CompatibilityEngine.PARALLEL_COMPATIBLE_WORK_TYPES:
+                            errors.append(
+                                f"INCOMPATIBLE WORK OVERLAP: Job {j1.get('job_code', j1['job_id'])} ({wt1}) and Job {j2.get('job_code', j2['job_id'])} ({wt2}) overlap on Section {sec1_set & sec2_set} without verified parallel compatibility."
+                            )
 
         is_valid = (len(errors) == 0)
         return is_valid, errors, warnings

@@ -85,9 +85,16 @@ def test_delay_simulation_and_dynamic_replanning(planner_token):
     assert delay_data["train_number"] == "12919"
 
     # 2. Trigger Dynamic Re-planning
+    from app.db.session import SessionLocal
+    from app.models.models import BlockPlan
+    db = SessionLocal()
+    bp = db.query(BlockPlan).order_by(BlockPlan.id.desc()).first()
+    base_plan_id = bp.id if bp else 1
+    db.close()
+
     replan_res = client.post(
         "/api/dynamic/replan",
-        json={"base_plan_id": 1, "trigger_event": "TRAIN_DELAY", "affected_train_number": "12919"},
+        json={"base_plan_id": base_plan_id, "trigger_event": "TRAIN_DELAY", "affected_train_number": "12919"},
         headers=headers
     )
     assert replan_res.status_code == 200

@@ -3,8 +3,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
 
-from app.models.models import MaintenanceJob, RailwaySection, Corridor, TrainMovement
-from app.services.planning_service import PlanningService
+from app.models.models import MaintenanceJob, RailwaySection, Corridor, TrainMovement, BlockWindow
 
 
 class CompatibilityEngine:
@@ -18,7 +17,10 @@ class CompatibilityEngine:
     PARALLEL_COMPATIBLE_WORK_TYPES = {
         ("TRACK_TAMPING", "SIGNAL_INSPECTION"),
         ("TRACK_TAMPING", "OHE_INSPECTION"),
+        ("TRACK_TAMPING", "POINT_OVERHAUL"),
+        ("TRACK_TAMPING", "SIGNAL_POINT_OVERHAUL"),
         ("SIGNAL_INSPECTION", "OHE_INSPECTION"),
+        ("SIGNAL_POINT_OVERHAUL", "OHE_INSPECTION"),
         ("TRACK_MAINTENANCE", "SIGNAL_INSPECTION"),
         ("TRACK_MAINTENANCE", "OHE_INSPECTION"),
         ("TRACK_SURFACING", "POINT_OVERHAUL"),
@@ -70,19 +72,28 @@ class CompatibilityEngine:
         for candidate in sorted_jobs[1:]:
             cand_reasons = []
 
-            # 1. Geographic Section / Corridor Compatibility
+            # 1. Geographic Physical Section Compatibility
             same_sec = (ref_sec_id is not None and candidate.section_id == ref_sec_id)
+            overlap_sec = False
+            if ref_job.affected_sections_json and candidate.affected_sections_json:
+                overlap_sec = bool(set(ref_job.affected_sections_json) & set(candidate.affected_sections_json))
+            elif ref_sec_id is not None and candidate.affected_sections_json:
+                overlap_sec = ref_sec_id in candidate.affected_sections_json
+            elif candidate.section_id is not None and ref_job.affected_sections_json:
+                overlap_sec = candidate.section_id in ref_job.affected_sections_json
+
             same_stations = (
                 candidate.start_station_code == ref_stations[0] and
                 candidate.end_station_code == ref_stations[1]
             )
-            same_corridor = (ref_corr_id is not None and candidate.corridor_id == ref_corr_id)
 
-            if not (same_sec or same_stations or same_corridor):
+            # Corridor-wide grouping without physical section overlap is strictly rejected
+            if not (same_sec or overlap_sec or same_stations):
                 cand_reasons.append(
-                    f"Geographic mismatch: {candidate.job_code} is on different section/corridor "
+                    f"Geographic mismatch: {candidate.job_code} is on Section {candidate.section_id} "
                     f"({candidate.start_station_code} → {candidate.end_station_code}) "
-                    f"vs reference ({ref_stations[0]} → {ref_stations[1]})."
+                    f"vs reference Section {ref_sec_id} ({ref_stations[0]} → {ref_stations[1]}). "
+                    f"Common corridor alone does NOT permit possession grouping."
                 )
 
             # 2. Date Compatibility
@@ -180,18 +191,36 @@ class CompatibilityEngine:
 
     @classmethod
     def _check_parallel_execution(cls, jobs: List[MaintenanceJob]) -> Tuple[bool, List[str]]:
-        """Determines if the technical work profiles can overlap safely."""
+        """
+        Determines if the technical work profiles can overlap safely.
+        Strict Safety Rule: Cross-department tasks can only overlap if EVERY pair of concurrent
+        jobs is verified in PARALLEL_COMPATIBLE_WORK_TYPES.
+        """
         work_types = [j.work_type.upper() for j in jobs]
         dept_codes = [j.department.code.upper() if j.department else "ENGG" for j in jobs]
 
-        # If jobs are from different departments (Civil + S&T + TRD), they are coordinated by design on IR
-        # S&T inspector inspects points while Civil tampers and TRD inspects OHE in parallel
-        has_different_depts = len(set(dept_codes)) > 1
-        if has_different_depts:
-            return True, ["Cross-departmental track, signaling, and traction coordination permits parallel window."]
+        n = len(jobs)
+        for i in range(n):
+            for j in range(i + 1, n):
+                w1 = work_types[i]
+                w2 = work_types[j]
+                d1 = dept_codes[i]
+                d2 = dept_codes[j]
 
-        # Check if work pairs are parallel compatible
-        return True, ["Compatible work types fit concurrent possession envelope."]
+                if w1 == w2 and d1 == d2:
+                    # Same department same work on same physical section cannot overlap in time unless non-disruptive inspection
+                    if not any(term in w1 for term in ["INSPECTION", "SURVEY", "PATROL"]):
+                        return False, [f"Physical conflict: Multiple {w1} gangs cannot occupy the same physical section simultaneously."]
+                    continue
+
+                pair1 = (w1, w2)
+                pair2 = (w2, w1)
+                if pair1 not in cls.PARALLEL_COMPATIBLE_WORK_TYPES and pair2 not in cls.PARALLEL_COMPATIBLE_WORK_TYPES:
+                    both_inspection = ("INSPECTION" in w1 and "INSPECTION" in w2)
+                    if not both_inspection:
+                        return False, [f"Safety restriction: {w1} ({d1}) and {w2} ({d2}) are not verified for parallel execution on the same track possession."]
+
+        return True, ["All co-located maintenance jobs verified as physically and technically compatible for parallel possession."]
 
     @classmethod
     def cluster_compatible_groups(cls, jobs: List[MaintenanceJob]) -> List[Dict[str, Any]]:
@@ -375,8 +404,34 @@ class CoordinatedOptimizer:
         individual_durations_sum = sum(durations)
         saved_min = max(0, individual_durations_sum - common_duration) if is_parallel else 0
 
-        # 2. Identify candidate window from PlanningService
-        all_windows = PlanningService.generate_windows(db, corridor_id=corridor.id if corridor else None)
+        # 2. Identify candidate window from persisted BlockWindow or WindowEngine
+        all_windows_models = db.query(BlockWindow).filter(BlockWindow.corridor_id == corridor.id).all() if corridor else db.query(BlockWindow).all()
+        all_windows = [
+            {
+                "id": w.id,
+                "window_code": w.window_code,
+                "section_id": w.section_id,
+                "corridor_id": w.corridor_id,
+                "start_min": w.start_min,
+                "end_min": w.end_min,
+                "usable_duration_min": w.usable_duration_min,
+                "train_before_no": w.train_before_no,
+                "train_after_no": w.train_after_no,
+                "feasibility": w.feasibility
+            }
+            for w in all_windows_models
+        ]
+        if not all_windows:
+            from app.algorithms.windows import WindowEngine
+            from app.services.train_service import TrainService
+            sec_id = ref_job.section_id or 1
+            occs = TrainService.calculate_all_occupancies(db) or []
+            all_windows = WindowEngine.calculate_feasible_windows(
+                section_id=sec_id,
+                corridor_id=corridor.id if corridor else 1,
+                occupancies=occs,
+                has_timetable_data=True
+            )
         matched_windows = [
             w for w in all_windows
             if (ref_job.section_id is None or w.get("section_id") == ref_job.section_id) and w.get("usable_duration_min", 0) >= common_duration
@@ -797,6 +852,10 @@ class CoordinatedOptimizer:
             "SECTION-103": 645,  # 10:45 AM
             "SECTION-204": 780,  # 13:00 PM
             "SECTION-305": 900,  # 15:00 PM
+            "SEC_CVP_KDU": 645,  # 10:45 AM
+            "SEC_MDU_TDN": 780,  # 13:00 PM
+            "22": 645,
+            "25": 780,
         }
 
         for idx, grp in enumerate(groups):
@@ -804,15 +863,24 @@ class CoordinatedOptimizer:
             plan_num = idx + 1
             plan_name = f"PLAN {plan_num:02d}"
 
+            req_start_min = None
+            if getattr(grp_jobs[0], 'requested_start_time', None):
+                try:
+                    p = str(grp_jobs[0].requested_start_time).strip().split(":")
+                    req_start_min = int(p[0]) * 60 + int(p[1])
+                except Exception:
+                    pass
+
+            sec_obj = grp_jobs[0].section
+            sec_code = (getattr(sec_obj, 'section_id', None) or getattr(sec_obj, 'name', None) or getattr(grp_jobs[0], 'section_name', '') or "") if sec_obj else getattr(grp_jobs[0], 'section_name', '')
+            matching_preset = next((k for k in default_section_starts if k in str(sec_code) or (grp_jobs[0].section_id and k == str(grp_jobs[0].section_id))), None)
+            target_start = req_start_min if req_start_min is not None else (default_section_starts[matching_preset] if matching_preset else None)
+
             if grp["coordination_type"] == "COMMON_BLOCK":
                 opt_res = cls.optimize(grp_jobs, db, strategy=strategy)
-                # Adjust timing if section already has an allocated window or specific corridor preset
-                sec_obj = grp_jobs[0].section
-                sec_code = (getattr(sec_obj, 'section_id', None) or getattr(sec_obj, 'name', None) or getattr(grp_jobs[0], 'section_name', '') or "") if sec_obj else getattr(grp_jobs[0], 'section_name', '')
-                matching_preset = next((k for k in default_section_starts if k in sec_code or (grp_jobs[0].section_id and k.endswith(str(grp_jobs[0].section_id)))), None)
-                if matching_preset and not grp_jobs[0].preferred_start_min:
+                if target_start is not None and not getattr(grp_jobs[0], 'preferred_start_min', None):
                     dur = opt_res["total_possession_duration_min"]
-                    s_min = default_section_starts[matching_preset]
+                    s_min = target_start
                     e_min = s_min + dur
                     hh_s, mm_s = divmod(s_min, 60)
                     hh_e, mm_e = divmod(e_min, 60)
@@ -831,30 +899,15 @@ class CoordinatedOptimizer:
                         opt_res["alternatives"][0]["time_window"] = opt_res["common_block_window"]
             else:
                 opt_res = cls.optimize_single_job(grp_jobs[0], db, strategy=strategy, allocated_windows=allocated_windows)
-                sec_obj = grp_jobs[0].section
-                sec_code = (getattr(sec_obj, 'section_id', None) or getattr(sec_obj, 'name', None) or getattr(grp_jobs[0], 'section_name', '') or "") if sec_obj else getattr(grp_jobs[0], 'section_name', '')
-                matching_preset = next((k for k in default_section_starts if k in sec_code or (grp_jobs[0].section_id and k.endswith(str(grp_jobs[0].section_id)))), None)
-                if matching_preset and not grp_jobs[0].preferred_start_min:
+                if target_start is not None and not getattr(grp_jobs[0], 'preferred_start_min', None):
                     dur = opt_res["total_possession_duration_min"]
-                    s_min = default_section_starts[matching_preset]
+                    s_min = target_start
                     e_min = s_min + dur
                     hh_s, mm_s = divmod(s_min, 60)
                     hh_e, mm_e = divmod(e_min, 60)
                     opt_res["start_min"] = s_min
                     opt_res["end_min"] = e_min
                     opt_res["common_block_window"] = f"{hh_s:02d}:{mm_s:02d} – {hh_e:02d}:{mm_e:02d}"
-                    for wb in opt_res["work_breakdown"]:
-                        wb["scheduled_start_min"] = s_min
-                        wb["scheduled_end_min"] = s_min + wb["duration_min"]
-                        w_hh_s, w_mm_s = divmod(wb["scheduled_start_min"], 60)
-                        w_hh_e, w_mm_e = divmod(wb["scheduled_end_min"], 60)
-                        wb["scheduled_time"] = f"{w_hh_s:02d}:{w_mm_s:02d} – {w_hh_e:02d}:{w_mm_e:02d}"
-                    if opt_res["alternatives"]:
-                        opt_res["alternatives"][0]["start_min"] = s_min
-                        opt_res["alternatives"][0]["end_min"] = e_min
-                        opt_res["alternatives"][0]["time_window"] = opt_res["common_block_window"]
-
-
                     for wb in opt_res["work_breakdown"]:
                         wb["scheduled_start_min"] = s_min
                         wb["scheduled_end_min"] = s_min + wb["duration_min"]

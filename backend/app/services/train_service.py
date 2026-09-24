@@ -486,6 +486,7 @@ class TrainService:
         stale_threshold = getattr(settings, "LIVE_DATA_STALE_AFTER_SECONDS", 120)
         train_items = []
         live_count = 0
+        stale_count = 0
         unavailable_count = 0
 
         for t in candidate_trains:
@@ -528,7 +529,7 @@ class TrainService:
                     location_str = f"{tm.current_section.section_id}: {sec_name} (Stale)" if tm.current_section else sec_name
                     source_str = f"Live Radar (Stale — {age_min}m old)"
                     last_upd_str = tm.last_updated.strftime("%H:%M:%S") if tm.last_updated else "—"
-                    unavailable_count += 1
+                    stale_count += 1
                 else:
                     live_status = "SCHEDULED — LIVE UNAVAILABLE"
                     source_str = "Timetable Master (IRCTC/SR)"
@@ -619,14 +620,18 @@ class TrainService:
             overall_status = "LIVE"
         elif live_count > 0:
             overall_status = "PARTIAL"
+        elif stale_count > 0:
+            overall_status = "STALE"
         else:
             overall_status = "LIVE_DATA_UNAVAILABLE"
 
-        reason_code = "OK" if live_count > 0 else (
+        reason_code = "OK" if (live_count > 0 or stale_count > 0) else (
             "RATE_LIMITED" if prov_status == "RATE_LIMITED" else (
                 "KEY_MISSING" if prov_status == "KEY_MISSING" else "UNAVAILABLE"
             )
         )
+
+        data_coverage = round(((live_count + stale_count) / max(1, scheduled_cnt)) * 100, 1)
 
         return {
             "corridor": {
@@ -636,7 +641,9 @@ class TrainService:
             "journeyDate": target_d.isoformat(),
             "scheduledTrainCount": scheduled_cnt,
             "liveAvailableCount": live_count,
+            "staleCount": stale_count,
             "liveUnavailableCount": unavailable_count,
+            "dataCoveragePct": data_coverage,
             "liveStatus": overall_status,
             "reason": reason_code,
             "nonRunningTrainCount": len(non_running_trains),
@@ -775,7 +782,7 @@ class TrainService:
                 if any(code in tn_overlap for code in corridor_stn_codes):
                     matching.insert(0, t_16127)
 
-            return matching[:max_trains]
+            return matching
 
         # Seed core Southern Railway TN train candidates if table is unseeded
         if db.query(Train).filter(Train.is_tn_relevant == True).count() == 0:
@@ -807,19 +814,18 @@ class TrainService:
                     t_exist.active = True
             db.commit()
 
-        # Global live tracking: strictly TN-relevant active trains
+        # Global live tracking: strictly TN-relevant active trains without artificial truncation
         trains = (
             db.query(Train)
             .filter(Train.active == True, Train.is_tn_relevant == True)
             .order_by(Train.priority_level.asc(), Train.id.asc())
-            .limit(max_trains)
             .all()
         )
 
         # Guarantee train 16127 is in candidate list
         t_16127 = db.query(Train).filter(Train.train_number == "16127").first()
         if t_16127 and t_16127 not in trains:
-            trains = [t_16127] + [t for t in trains if t.train_number != "16127"][:max_trains - 1]
+            trains = [t_16127] + [t for t in trains if t.train_number != "16127"]
 
         return trains
 
@@ -858,7 +864,7 @@ class TrainService:
         if not to_poll:
             return []
 
-        to_poll = to_poll[:max_trains]
+        to_poll = to_poll
         print(f"[LIVE] Polling {len(to_poll)} eligible TN trains: {to_poll}")
 
         # Prepare section candidates for map matching
@@ -1116,12 +1122,21 @@ class TrainService:
         return movements
 
     @staticmethod
-    def calculate_all_occupancies(db: Session) -> List[Dict[str, Any]]:
+    @staticmethod
+    def calculate_all_occupancies(
+        db: Session,
+        target_date: Optional[date] = None,
+        persist: bool = False
+    ) -> List[Dict[str, Any]]:
         """
         Calculates all train section occupancies across corridor sections
-        using persisted TrainMovement data from the database.
-        Strictly DOES NOT call RailRadar directly.
+        using persisted TrainMovement and TrainRouteStop data.
+        - O(1) bulk prefetch eliminates N+1 query overhead.
+        - Strict running-day filtering: only trains scheduled on target_date are calculated.
+        - Strictly read-only by default (persist=False). NEVER deletes data on GET.
+        - When persist=True, performs atomic upsert without blanket table wipe.
         """
+        target_d = target_date or date.today()
         trains = db.query(Train).filter(Train.active == True).all()
         sections = db.query(RailwaySection).all()
         movements = db.query(TrainMovement).all()
@@ -1142,20 +1157,27 @@ class TrainService:
                 "name": s.name,
                 "from_station_id": s.from_station_id,
                 "to_station_id": s.to_station_id,
+                "from_station_code": s.from_station.code if s.from_station else None,
+                "to_station_code": s.to_station.code if s.to_station else None,
                 "length_km": s.length_km,
                 "max_speed_kmh": s.max_speed_kmh
             }
             for s in sections
         ]
 
+        # Phase 34: Bulk prefetch all route stops to eliminate N+1 queries
+        all_stops = db.query(TrainRouteStop).order_by(TrainRouteStop.train_number, TrainRouteStop.sequence).all()
+        stops_by_train = {}
+        for st in all_stops:
+            stops_by_train.setdefault(st.train_number, []).append(st)
+
         all_occupancies = []
         for t in trains:
-            stops = (
-                db.query(TrainRouteStop)
-                .filter(TrainRouteStop.train_number == t.train_number)
-                .order_by(TrainRouteStop.sequence)
-                .all()
-            )
+            # Phase 4: Enforce running-day filtering
+            if not TrainService.is_running_today(t, target_d, db):
+                continue
+
+            stops = stops_by_train.get(t.train_number, [])
             if not stops:
                 continue
 
@@ -1199,24 +1221,42 @@ class TrainService:
             )
             all_occupancies.extend(t_occs)
 
-        # Synchronize calculated occupancies into DB
-        try:
-            db.query(TrainSectionOccupancy).delete()
-            for occ in all_occupancies:
-                tso = TrainSectionOccupancy(
-                    train_number=occ["train_number"],
-                    section_id=occ["section_id"],
-                    estimated_entry_min=occ["estimated_entry_min"],
-                    estimated_exit_min=occ["estimated_exit_min"],
-                    confidence=occ.get("confidence", 0.95),
-                    source=occ.get("source", "calculated"),
-                    calculated_at=datetime.utcnow()
-                )
-                db.add(tso)
-            db.commit()
-        except Exception as e:
-            print(f"[OCCUPANCY] Error syncing occupancies to DB: {e}")
-            db.rollback()
+        # Atomic synchronization into DB only when persist=True (never on read/GET)
+        if persist:
+            try:
+                existing = db.query(TrainSectionOccupancy).all()
+                existing_map = {(o.train_number, o.section_id): o for o in existing}
+                for occ in all_occupancies:
+                    key = (occ["train_number"], occ["section_id"])
+                    dur = occ.get("traversal_duration_min") or max(0, occ["estimated_exit_min"] - occ["estimated_entry_min"])
+                    if key in existing_map:
+                        tso = existing_map[key]
+                        tso.estimated_entry_min = occ["estimated_entry_min"]
+                        tso.estimated_exit_min = occ["estimated_exit_min"]
+                        tso.traversal_duration_min = dur
+                        tso.direction = occ.get("direction", "UP")
+                        tso.confidence = occ.get("confidence", 0.95)
+                        tso.data_quality_state = occ.get("data_quality_state", "AUTHORITATIVE_WTT")
+                        tso.source = occ.get("source", "calculated")
+                        tso.calculated_at = datetime.utcnow()
+                    else:
+                        tso = TrainSectionOccupancy(
+                            train_number=occ["train_number"],
+                            section_id=occ["section_id"],
+                            estimated_entry_min=occ["estimated_entry_min"],
+                            estimated_exit_min=occ["estimated_exit_min"],
+                            traversal_duration_min=dur,
+                            direction=occ.get("direction", "UP"),
+                            confidence=occ.get("confidence", 0.95),
+                            data_quality_state=occ.get("data_quality_state", "AUTHORITATIVE_WTT"),
+                            source=occ.get("source", "calculated"),
+                            calculated_at=datetime.utcnow()
+                        )
+                        db.add(tso)
+                db.commit()
+            except Exception as e:
+                print(f"[OCCUPANCY] Error syncing occupancies to DB: {e}")
+                db.rollback()
 
         return all_occupancies
 
@@ -1439,6 +1479,9 @@ class TrainService:
             sections_resp.append(sec_obj)
             sec_y_map[sec.id] = (y_top, y_bot)
 
+        # Ensure sections_resp is strictly sorted by physical start_km
+        sections_resp.sort(key=lambda s: s["start_km"])
+
         # 5. Get Live Movements & Section Mappings
         movements = TrainService.get_train_movements(db, corridor_id=corridor_id)
         mov_map = {m["train_number"]: m for m in movements}
@@ -1559,7 +1602,9 @@ class TrainService:
             })
 
         # 7. Occupancies & Feasible Windows
-        occupancies = TrainService.calculate_all_occupancies(db)
+        corridor_sec_ids = {s.id for s in sections}
+        all_occs = TrainService.calculate_all_occupancies(db)
+        occupancies = [o for o in all_occs if o.get("section_id") in corridor_sec_ids]
         windows = PlanningService.generate_windows(db, corridor.id)
 
         windows_resp = []

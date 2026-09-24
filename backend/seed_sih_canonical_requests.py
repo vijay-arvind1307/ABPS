@@ -18,65 +18,23 @@ def seed_sih_requests():
         sa_stn = db.query(Station).filter(Station.code == "SA").first()
 
         # Corridors
-        corr_mdu_ten = db.query(Corridor).filter(Corridor.corridor_id == "CORR_C15_MDU_TEN").first() or \
+        # Corridors - resolve canonical C40 (ID 30)
+        corr_mdu_ten = db.query(Corridor).filter(Corridor.prototype_code == "C40").first() or \
+                       db.query(Corridor).filter(Corridor.corridor_id == "CORR_C40_MDU_TEN").first() or \
+                       db.query(Corridor).filter(Corridor.id == 30).first() or \
                        db.query(Corridor).filter(Corridor.start_station_code == "MDU", Corridor.end_station_code == "TEN").first()
-        corr_cbe_sa = db.query(Corridor).filter(Corridor.corridor_id == "CORR_C10_CBE_SA").first() or \
+        corr_cbe_sa = db.query(Corridor).filter(Corridor.prototype_code == "C10").first() or \
+                      db.query(Corridor).filter(Corridor.corridor_id == "CORR_C10_CBE_SA").first() or \
                       db.query(Corridor).filter(Corridor.start_station_code == "CBE", Corridor.end_station_code == "SA").first()
 
-        # Sections
-        sec_103 = db.query(RailwaySection).filter(RailwaySection.section_id == "SECTION-103").first()
-        if not sec_103:
-            sec_103 = RailwaySection(
-                section_id="SECTION-103",
-                name="SECTION-103 (Kovilpatti - Tirunelveli)",
-                corridor_id=corr_mdu_ten.id if corr_mdu_ten else 10,
-                from_station_id=cvp_stn.id if cvp_stn else 293,
-                to_station_id=ten_stn.id if ten_stn else 287,
-                length_km=65.0,
-                max_speed_kmh=110.0,
-                track_type="DOUBLE_UP",
-                direction="BOTH",
-                is_electrified=True
-            )
-            db.add(sec_103)
-            db.commit()
-            db.refresh(sec_103)
+        # Sections - use canonical physical block sections
+        sec_cvp_kdu = db.query(RailwaySection).filter(RailwaySection.section_id == "SEC_CVP_KDU").first()
+        sec_mdu_tdn = db.query(RailwaySection).filter(RailwaySection.section_id == "SEC_MDU_TDN").first()
 
-        sec_204 = db.query(RailwaySection).filter(RailwaySection.section_id == "SECTION-204").first()
-        if not sec_204:
-            sec_204 = RailwaySection(
-                section_id="SECTION-204",
-                name="SECTION-204 (Madurai - Tirunelveli)",
-                corridor_id=corr_mdu_ten.id if corr_mdu_ten else 10,
-                from_station_id=mdu_stn.id if mdu_stn else 5,
-                to_station_id=ten_stn.id if ten_stn else 287,
-                length_km=155.0,
-                max_speed_kmh=110.0,
-                track_type="DOUBLE_UP",
-                direction="BOTH",
-                is_electrified=True
-            )
-            db.add(sec_204)
-            db.commit()
-            db.refresh(sec_204)
-
+        # Fallback to macro-sections only if physical sections do not exist
+        sec_103 = sec_cvp_kdu or db.query(RailwaySection).filter(RailwaySection.section_id == "SECTION-103").first()
+        sec_204 = sec_mdu_tdn or db.query(RailwaySection).filter(RailwaySection.section_id == "SECTION-204").first()
         sec_305 = db.query(RailwaySection).filter(RailwaySection.section_id == "SECTION-305").first()
-        if not sec_305:
-            sec_305 = RailwaySection(
-                section_id="SECTION-305",
-                name="SECTION-305 (Coimbatore - Salem)",
-                corridor_id=corr_cbe_sa.id if corr_cbe_sa else 11,
-                from_station_id=cbe_stn.id if cbe_stn else 6,
-                to_station_id=sa_stn.id if sa_stn else 7,
-                length_km=160.0,
-                max_speed_kmh=120.0,
-                track_type="DOUBLE_UP",
-                direction="BOTH",
-                is_electrified=True
-            )
-            db.add(sec_305)
-            db.commit()
-            db.refresh(sec_305)
 
         planner = db.query(User).filter(User.username == "planner").first()
 
@@ -88,8 +46,8 @@ def seed_sih_requests():
                 "work_type": "TRACK_TAMPING",
                 "corridor": corr_mdu_ten,
                 "start_stn": "CVP",
-                "end_stn": "TEN",
-                "section": sec_103,
+                "end_stn": "KDU",
+                "section": sec_cvp_kdu or sec_103,
                 "duration": 90,
                 "priority": "HIGH",
                 "priority_score": 88.0,
@@ -106,8 +64,8 @@ def seed_sih_requests():
                 "work_type": "SIGNAL_INSPECTION",
                 "corridor": corr_mdu_ten,
                 "start_stn": "CVP",
-                "end_stn": "TEN",
-                "section": sec_103,
+                "end_stn": "KDU",
+                "section": sec_cvp_kdu or sec_103,
                 "duration": 60,
                 "priority": "MEDIUM",
                 "priority_score": 68.0,
@@ -124,8 +82,8 @@ def seed_sih_requests():
                 "work_type": "OHE_INSPECTION",
                 "corridor": corr_mdu_ten,
                 "start_stn": "CVP",
-                "end_stn": "TEN",
-                "section": sec_103,
+                "end_stn": "KDU",
+                "section": sec_cvp_kdu or sec_103,
                 "duration": 75,
                 "priority": "HIGH",
                 "priority_score": 82.0,
@@ -142,8 +100,8 @@ def seed_sih_requests():
                 "work_type": "TRACK_INSPECTION",
                 "corridor": corr_mdu_ten,
                 "start_stn": "MDU",
-                "end_stn": "TEN",
-                "section": sec_204,
+                "end_stn": "TDN",
+                "section": sec_mdu_tdn or sec_204,
                 "duration": 90,
                 "priority": "HIGH",
                 "priority_score": 85.0,
@@ -160,8 +118,8 @@ def seed_sih_requests():
                 "work_type": "SIGNAL_INSPECTION",
                 "corridor": corr_mdu_ten,
                 "start_stn": "MDU",
-                "end_stn": "TEN",
-                "section": sec_204,
+                "end_stn": "TDN",
+                "section": sec_mdu_tdn or sec_204,
                 "duration": 60,
                 "priority": "MEDIUM",
                 "priority_score": 66.0,

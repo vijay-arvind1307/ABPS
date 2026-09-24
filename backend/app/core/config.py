@@ -15,12 +15,20 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Railway Maintenance Block Planning System (IR-ABPS)"
     API_V1_STR: str = "/api"
 
+    # Environment
+    ENVIRONMENT: str = "development"
+
     SECRET_KEY: str = "ir-abps-railway-operations-secret-key-secure"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
 
-    # Database
+    # Database & Pooling (PostgreSQL in production, SQLite WAL in local dev)
     DATABASE_URL: str = "sqlite:///./abps.db"
+    DB_POOL_SIZE: int = 20
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_RECYCLE: int = 1800
+    DB_ECHO: bool = False
 
     # Train Data Provider
     TRAIN_DATA_MODE: str = "live"
@@ -37,16 +45,15 @@ class Settings(BaseSettings):
     RAILRADAR_CACHE_SECONDS: int = 30
     RAILRADAR_MIN_REQUEST_INTERVAL_SECONDS: int = 30
 
-    # Controlled Live Telemetry & TN Scoping
+    # Controlled Live Telemetry & Worker Configuration
     LIVE_POLL_INTERVAL_SECONDS: int = 45
     LIVE_REQUEST_COOLDOWN_SECONDS: int = 30
     LIVE_DATA_STALE_AFTER_SECONDS: int = 120
-    TN_LIVE_MAX_TRAINS: int = 15
     LIVE_BACKGROUND_POLLING_ENABLED: bool = True
 
-    # Planning & Safety Buffers
-    BUFFER_BEFORE_MIN: int = 5
-    BUFFER_AFTER_MIN: int = 5
+    # Planning & Safety Buffers (Standard Indian Railways Block Clearance Margins)
+    BUFFER_BEFORE_MIN: int = 15
+    BUFFER_AFTER_MIN: int = 15
     PLANNING_HORIZON_HOURS: int = 24
     PLANNING_HORIZON_DAYS: int = 7
     SOLVER_TIME_LIMIT_SECONDS: int = 15
