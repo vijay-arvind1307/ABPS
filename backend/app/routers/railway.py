@@ -359,28 +359,40 @@ def _resolve_corridor(corridor_ident: str, db: Session) -> Optional[Corridor]:
         return db.query(Corridor).filter(Corridor.id == int(s)).first()
     norm = s.upper()
 
-    # 1. Exact match on corridor_id or prototype_code
-    exact = db.query(Corridor).filter(
-        or_(
-            Corridor.corridor_id == norm,
-            Corridor.prototype_code == norm
-        )
-    ).first()
-    if exact:
-        return exact
-
-    # 2. Fallback to mapped canonical prototype code
+    # 1. Map legacy aliases to active canonical corridors first
     legacy_map = {
         "CORR_MDU_TEN": "CORR_C40_MDU_TEN",
         "CORR_MAS_AJJ": "CORR_C01_MAS_AJJ",
         "CORR_AJJ_JTJ": "CORR_C02_AJJ_JTJ",
         "CORR_MAS_GDR": "CORR_C03_MAS_GDR"
     }
-    eff = legacy_map.get(norm, norm)
+    if norm in legacy_map:
+        mapped = db.query(Corridor).filter(
+            or_(
+                Corridor.corridor_id == legacy_map[norm],
+                Corridor.prototype_code == legacy_map[norm]
+            )
+        ).first()
+        if mapped:
+            return mapped
+
+    # 2. Exact match prioritizing canonical corridors with prototype_code
+    canonical = db.query(Corridor).filter(
+        Corridor.prototype_code.isnot(None)
+    ).filter(
+        or_(
+            Corridor.corridor_id == norm,
+            Corridor.prototype_code == norm
+        )
+    ).first()
+    if canonical:
+        return canonical
+
+    # 3. Fallback exact match
     return db.query(Corridor).filter(
         or_(
-            Corridor.corridor_id == eff,
-            Corridor.prototype_code == eff
+            Corridor.corridor_id == norm,
+            Corridor.prototype_code == norm
         )
     ).first()
 

@@ -189,7 +189,9 @@ class MaintenanceService:
             department_code=dept_code,
             user_priority=user_prio,
             due_date=job_in.due_date,
-            is_emergency=job_in.is_emergency
+            is_emergency=job_in.is_emergency,
+            job_obj=job_in,
+            db_session=db
         )
 
         final_corridor_id = job_in.corridor_id or matched_corridor_id
@@ -241,6 +243,11 @@ class MaintenanceService:
             priority_score=scoring["priority_score"],
             safety_tier=scoring["safety_tier"],
             priority_explanation=scoring,
+            ml_risk_score=scoring.get("ml_risk_score"),
+            ml_risk_class=scoring.get("ml_risk_class"),
+            ai_assisted_priority_score=scoring.get("ai_assisted_priority_score"),
+            ml_model_version=scoring.get("ml_model_version"),
+            ml_explanation=scoring.get("ml_top_contributing_factors"),
             estimated_duration_min=job_in.estimated_duration_min,
             preferred_start_min=job_in.preferred_start_min,
             preferred_end_min=job_in.preferred_end_min,
@@ -318,7 +325,9 @@ class MaintenanceService:
             department_code=dept_code,
             user_priority=job.user_priority,
             due_date=job.due_date,
-            is_emergency=job.is_emergency
+            is_emergency=job.is_emergency,
+            job_obj=job,
+            db_session=db
         )
 
         job.calculated_criticality = scoring["criticality"]
@@ -330,6 +339,11 @@ class MaintenanceService:
         job.criticality = scoring["criticality"]
         job.safety_impact = scoring["safety_impact"]
         job.urgency = scoring["urgency"]
+        job.ml_risk_score = scoring.get("ml_risk_score")
+        job.ml_risk_class = scoring.get("ml_risk_class")
+        job.ai_assisted_priority_score = scoring.get("ai_assisted_priority_score")
+        job.ml_model_version = scoring.get("ml_model_version")
+        job.ml_explanation = scoring.get("ml_top_contributing_factors")
 
         # If planner override is not active, use calculated score
         if job.planner_override_score is None:

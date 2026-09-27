@@ -33,6 +33,26 @@ class PriorityEngine:
     }
 
     @classmethod
+    def get_ai_config(cls, db: Optional[Any] = None) -> Tuple[bool, float]:
+        """
+        Reads central AI configuration: AI_PRIORITY_ENABLED and ML_RISK_WEIGHT.
+        Fallback default: (True, 0.15) if database is unavailable.
+        """
+        enabled = True
+        weight = 0.15
+        if db is not None:
+            try:
+                from app.models.models import SystemConfig
+                cfg_en = db.query(SystemConfig).filter(SystemConfig.key == "AI_PRIORITY_ENABLED").first()
+                if cfg_en and cfg_en.value:
+                    enabled = (cfg_en.value.strip().lower() in ("true", "1", "yes", "on"))
+                cfg_wt = db.query(SystemConfig).filter(SystemConfig.key == "ML_RISK_WEIGHT").first()
+                if cfg_wt and cfg_wt.value:
+                    weight = float(cfg_wt.value)
+            except Exception:
+                pass
+        return enabled, weight
+
     @classmethod
     def calculate_criticality(
         cls,
@@ -294,12 +314,21 @@ class PriorityEngine:
         due_date: Optional[Any] = None,
         is_emergency: bool = False,
         custom_weights: Dict[str, float] = None,
-        operational_impact_val: Optional[float] = None
+        operational_impact_val: Optional[float] = None,
+        job_obj: Optional[Any] = None,
+        ml_risk_score: Optional[float] = None,
+        ai_priority_enabled: Optional[bool] = None,
+        ml_risk_weight: Optional[float] = None,
+        section_context: Optional[Dict[str, Any]] = None,
+        db_session: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
-        Executes deterministic multi-criteria scoring according to Section 8:
-        Priority Score = Criticality * 0.30 + Urgency * 0.20 + Overdue Risk * 0.15 + Safety Impact * 0.20 + Operational Impact * 0.15
-        IMPORTANT: These are configurable prototype weights, not official Indian Railways safety policy.
+        Executes multi-criteria scoring according to SIH26027 specifications:
+        1. Deterministic Multi-Criteria Priority (0-100):
+           Criticality*0.30 + Urgency*0.20 + OverdueRisk*0.15 + SafetyImpact*0.20 + OperationalImpact*0.15
+        2. ML Risk Prediction (0-100) via XGBoost (advisory maintenance urgency)
+        3. Configurable AI-Assisted Priority (when AI Mode is ON):
+           (1 - ML_RISK_WEIGHT) * Deterministic_Priority + ML_RISK_WEIGHT * ML_Risk_Score
         """
         weights = custom_weights or cls.DEFAULT_WEIGHTS
 
@@ -435,8 +464,92 @@ class PriorityEngine:
 
         summary_reason_text = " • ".join(reasons_list)
 
+        # ----------------------------------------------------
+        # 7. AI RISK PREDICTION & ASSISTED PRIORITY (SIH26027)
+        # ----------------------------------------------------
+        deterministic_priority = final_score
+
+        # Check Central AI Configuration
+        if ai_priority_enabled is None:
+            ai_priority_enabled, cfg_weight = cls.get_ai_config(db_session)
+        else:
+            cfg_weight = 0.15
+
+        effective_ml_weight = ml_risk_weight if ml_risk_weight is not None else cfg_weight
+
+        # Perform ML prediction if job data provided and not explicitly supplied
+        ml_status = "ML MODEL NOT CONFIGURED"
+        ml_top_factors = []
+        ml_model_version = "MRISK-XGB-1.0"
+        data_source = "SIMULATED"
+
+        if ml_risk_score is None and job_obj is not None:
+            try:
+                from app.ml.inference.risk_predictor import risk_predictor
+                pred_res = risk_predictor.predict(
+                    job_data=job_obj,
+                    section_context=section_context,
+                    db_session=db_session
+                )
+                if pred_res.prediction_status == "ML PREDICTION AVAILABLE":
+                    ml_risk_score = pred_res.ml_risk_score
+                    ml_risk_class = pred_res.risk_class
+                    ml_top_factors = pred_res.top_contributing_factors
+                    ml_model_version = pred_res.model_version
+                    ml_status = pred_res.prediction_status
+                    data_source = pred_res.data_source
+                else:
+                    ml_risk_score = None
+                    ml_risk_class = "UNAVAILABLE"
+                    ml_status = pred_res.prediction_status
+            except Exception as e:
+                ml_risk_score = None
+                ml_risk_class = "UNAVAILABLE"
+                ml_status = "ML PREDICTION FAILED"
+        elif ml_risk_score is not None:
+            from app.ml.config import classify_risk
+            ml_risk_class = classify_risk(ml_risk_score)
+            ml_status = "ML PREDICTION AVAILABLE"
+        else:
+            ml_risk_class = "UNAVAILABLE"
+
+        # Calculate AI-Assisted Priority with Graceful Fallback
+        if ai_priority_enabled and ml_risk_score is not None:
+            ai_assisted_prio = round(
+                (1.0 - effective_ml_weight) * deterministic_priority +
+                effective_ml_weight * ml_risk_score,
+                1
+            )
+            formula_breakdown = (
+                f"{deterministic_priority:.1f} * {(1.0 - effective_ml_weight)*100:.0f}% (Deterministic) + "
+                f"{ml_risk_score:.1f} * {effective_ml_weight*100:.0f}% (AI Risk) = {ai_assisted_prio:.1f}"
+            )
+            ai_mode_status = "AI MODE ON"
+            effective_priority = ai_assisted_prio
+        else:
+            ai_assisted_prio = deterministic_priority
+            formula_breakdown = f"100% Deterministic: {deterministic_priority:.1f}"
+            ai_mode_status = "AI MODE OFF" if not ai_priority_enabled else "ML UNAVAILABLE (FALLBACK)"
+            effective_priority = deterministic_priority
+
         return {
-            "priority_score": final_score,
+            # Primary effective score (respects AI mode on/off)
+            "priority_score": effective_priority,
+            # Preserved deterministic score
+            "deterministic_priority_score": deterministic_priority,
+            # AI Risk Fields (Advisory Decision-Support)
+            "ml_risk_score": ml_risk_score,
+            "ml_risk_class": ml_risk_class,
+            "ai_assisted_priority_score": ai_assisted_prio,
+            "ai_priority_enabled": bool(ai_priority_enabled),
+            "ai_mode_status": ai_mode_status,
+            "ml_risk_weight": effective_ml_weight,
+            "ml_formula_breakdown": formula_breakdown,
+            "ml_model_version": ml_model_version,
+            "ml_status": ml_status,
+            "ml_top_contributing_factors": ml_top_factors,
+            "data_source": data_source,
+            # Existing Deterministic Fields
             "safety_tier": safety_tier,
             "criticality": c_score,
             "criticality_label": c_label,
@@ -534,3 +647,21 @@ def wt_human(work_type: str) -> str:
     if not work_type:
         return "Maintenance"
     return work_type.replace("_", " ").title()
+
+
+def calculate_full_priority(*args, **kwargs) -> Dict[str, Any]:
+    """Module-level wrapper for PriorityEngine.calculate_full_priority."""
+    if len(args) == 1 and isinstance(args[0], dict) and "work_type" not in kwargs:
+        d = args[0]
+        return PriorityEngine.calculate_full_priority(
+            work_type=d.get("work_type", "Track Renewal"),
+            department_code=d.get("department_code", "ENGG"),
+            user_priority=d.get("user_priority", "MEDIUM"),
+            due_date=d.get("due_date"),
+            is_emergency=d.get("is_emergency", False),
+            operational_impact_val=d.get("operational_impact"),
+            job_obj=d,
+            ml_risk_score=d.get("ml_risk_score"),
+            **kwargs
+        )
+    return PriorityEngine.calculate_full_priority(*args, **kwargs)

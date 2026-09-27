@@ -422,15 +422,15 @@ def test_32_optimistic_locking_prevents_stale_update(planner_token: str, db: Ses
     headers = {"Authorization": planner_token}
     plan = db.query(CoordinatedBlockPlan).first()
     if not plan:
-        plan = CoordinatedBlockPlan(plan_code="CBP-LOCK-TEST", start_min=600, end_min=690, status="PROPOSED", version=1)
+        plan = CoordinatedBlockPlan(plan_code="CBP-LOCK-TEST", start_min=600, end_min=690, duration_min=90, status="PROPOSED", version=1)
         db.add(plan)
         db.commit()
         db.refresh(plan)
 
-    res = client.put(
-        f"/api/block-planning/plans/{plan.id}",
+    res = client.post(
+        f"/api/coordinated-block-plans/{plan.id}/modify",
         headers=headers,
-        json={"version": 9999, "start_min": 650, "end_min": 740}
+        json={"version": 9999, "recommended_start_min": 650, "recommended_end_min": 740, "reason": "Conflict test"}
     )
     assert res.status_code == 409
 

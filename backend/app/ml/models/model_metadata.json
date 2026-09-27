@@ -1,0 +1,116 @@
+{
+  "model_version": "MRISK-XGB-1.0",
+  "feature_version": "v1.0-structured",
+  "algorithm": "XGBoost Regressor (GBDT)",
+  "target": "maintenance_risk",
+  "target_description": "Estimated multi-factor physical degradation and operational headway risk (0-100) if the requested maintenance possession is delayed or deferred.",
+  "data_source": "SIMULATED",
+  "dataset_version": "SIM-MRISK-2026.1",
+  "dataset_total_samples": 3000,
+  "train_samples": 2400,
+  "test_samples": 600,
+  "training_timestamp": "2026-09-24T14:14:48.098907Z",
+  "random_seed": 42,
+  "hyperparameters": {
+    "n_estimators": 160,
+    "max_depth": 5,
+    "learning_rate": 0.07,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "min_child_weight": 3,
+    "gamma": 0.1,
+    "reg_alpha": 0.05,
+    "reg_lambda": 1.0,
+    "random_state": 42,
+    "n_jobs": -1
+  },
+  "features": [
+    "asset_condition",
+    "asset_age_years",
+    "asset_criticality",
+    "defect_severity",
+    "defect_age_days",
+    "days_until_due",
+    "overdue_days",
+    "failure_history_count",
+    "maintenance_frequency_days",
+    "last_maintenance_age_days",
+    "operational_importance",
+    "train_traffic_density",
+    "section_utilization",
+    "historical_delay_impact_min",
+    "maintenance_duration_min",
+    "safety_impact",
+    "department_code_enc",
+    "work_type_enc",
+    "user_priority_enc"
+  ],
+  "feature_count": 19,
+  "feature_importances": {
+    "defect_severity": 0.5489733219146729,
+    "safety_impact": 0.15955251455307007,
+    "days_until_due": 0.11568978428840637,
+    "overdue_days": 0.0831618383526802,
+    "train_traffic_density": 0.018281428143382072,
+    "section_utilization": 0.018142113462090492,
+    "asset_criticality": 0.015390301123261452,
+    "defect_age_days": 0.009726730175316334,
+    "asset_condition": 0.008479882031679153,
+    "historical_delay_impact_min": 0.004682120867073536,
+    "failure_history_count": 0.0044213770888745785,
+    "operational_importance": 0.0022493363358080387,
+    "asset_age_years": 0.0018020287388935685,
+    "maintenance_frequency_days": 0.0017984939040616155,
+    "work_type_enc": 0.0017137436661869287,
+    "last_maintenance_age_days": 0.0016873246058821678,
+    "maintenance_duration_min": 0.0015437286347150803,
+    "department_code_enc": 0.0013595938216894865,
+    "user_priority_enc": 0.0013442753115668893
+  },
+  "evaluation_metrics": {
+    "test_mae": 2.425,
+    "test_rmse": 3.066,
+    "test_r2": 0.9265,
+    "test_risk_class_accuracy": 0.905,
+    "classification_report": {
+      "CRITICAL": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 1.0
+      },
+      "HIGH": {
+        "precision": 0.4,
+        "recall": 0.4,
+        "f1-score": 0.4,
+        "support": 5.0
+      },
+      "LOW": {
+        "precision": 0.9365994236311239,
+        "recall": 0.9180790960451978,
+        "f1-score": 0.927246790299572,
+        "support": 354.0
+      },
+      "MEDIUM": {
+        "precision": 0.8709677419354839,
+        "recall": 0.9,
+        "f1-score": 0.8852459016393442,
+        "support": 240.0
+      },
+      "accuracy": 0.905,
+      "macro avg": {
+        "precision": 0.551891791391652,
+        "recall": 0.5545197740112995,
+        "f1-score": 0.5531231729847291,
+        "support": 600.0
+      },
+      "weighted avg": {
+        "precision": 0.90431409004989,
+        "recall": 0.905,
+        "f1-score": 0.9045073002658186,
+        "support": 600.0
+      }
+    }
+  },
+  "disclaimer": "Advisory AI Predicted Maintenance Risk. Not an official Indian Railways safety score. Safety decisions must be validated by certified railway staff."
+}

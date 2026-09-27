@@ -14,4 +14,5 @@ from app.routers.notifications import router as notifications_router
 from app.routers.live import router as live_router
 from app.routers.availability import router as availability_router
 from app.routers.standard_api import router as standard_api_router
+from app.routers.ml_router import router as ml_router
 

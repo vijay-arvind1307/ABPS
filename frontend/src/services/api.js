@@ -65,6 +65,24 @@ export const replanCoordinatedBlockPlan = (id, data = {}) =>
 export const getCoordinatedPlanAudit = (id) =>
   api.get(`/coordinated-block-plans/${id}/audit`);
 
+// SIH26027 Plan Modification & Department Response Workflow Endpoints
+export const validateAlternativeWindow = (data, planId = null) => {
+  if (planId) {
+    return api.post(`/block-plans/${planId}/validate-alternative`, data);
+  }
+  return api.post('/coordinated-block-plans/validate-alternative', data);
+};
+export const proposePlanModification = (planId, data) =>
+  api.post(`/block-plans/${planId}/modification`, data);
+export const getDepartmentModifications = () =>
+  api.get('/department/modifications');
+export const getBlockPlanModifications = (planId) =>
+  api.get(`/block-plans/${planId}/modifications`);
+export const acceptModificationProposal = (proposalId, data = {}) =>
+  api.post(`/modifications/${proposalId}/accept`, data);
+export const rejectModificationProposal = (proposalId, data = {}) =>
+  api.post(`/modifications/${proposalId}/reject`, data);
+
 
 // Departments Master
 export const getDepartments = () => api.get('/departments');
@@ -178,6 +196,16 @@ export const getPlanExportUrl = (id) => `${API_BASE_URL}/reports/plans/${id}/exp
 
 // Planning Scenario Ingestion & Reset
 export const resetPlanningScenario = () => api.post('/scenario/load-corridor-scenario');
+
+// Machine Learning Risk Prediction Endpoints (SIH26027 XGBoost Advisory Layer)
+export const getMLModelStatus = () => api.get('/ml/model-status');
+export const getMLMetadata = () => api.get('/ml/model-metadata');
+export const getMLEvaluation = () => api.get('/ml/evaluation');
+export const getMLConfig = () => api.get('/ml/config');
+export const toggleAIMode = (enabled, ml_weight = null) => api.post('/ml/toggle-ai', { enabled, ml_weight });
+export const getMLPrediction = (requestId) => api.get(`/ml/prediction/${requestId}`);
+export const predictMLRisk = (requestId) => api.post(`/ml/predict/${requestId}`);
+export const getMLExplanation = (requestId) => api.get(`/ml/explanation/${requestId}`);
 
 export default api;
 

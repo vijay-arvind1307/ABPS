@@ -3,6 +3,9 @@
 @tailwind utilities;
 
 @layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
   body {
     @apply bg-[#F4F6F9] text-slate-900 text-[13px] leading-snug;
   }

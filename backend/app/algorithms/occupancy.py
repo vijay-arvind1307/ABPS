@@ -98,6 +98,8 @@ class OccupancyEngine:
                     raw_entry = dep_a
                     raw_exit = max(raw_entry + nominal_transit_min, arr_b)
                     direction = "DOWN"
+                    m_from_code = sec.get("from_station_code")
+                    m_to_code = sec.get("to_station_code")
                 elif stop_b["sequence"] < stop_a["sequence"]:
                     # Train travels against corridor graph (e.g. TEN -> MDU): Indian Railways UP movement (↑ UP)
                     dep_b = int(stop_b["departure_min"]) + current_delay_min
@@ -106,10 +108,13 @@ class OccupancyEngine:
                     raw_entry = dep_b
                     raw_exit = max(raw_entry + nominal_transit_min, arr_a)
                     direction = "UP"
+                    m_from_code = sec.get("to_station_code")
+                    m_to_code = sec.get("from_station_code")
                 else:
                     continue
 
-                dur = max(1, raw_exit - raw_entry)
+                dur = max(1, min(120, raw_exit - raw_entry))
+                raw_exit = raw_entry + dur
                 # Normalize multi-day arrival/departure minutes to 24-hour target date cycle
                 norm_entry = raw_entry % 1440
                 norm_exit = norm_entry + dur
@@ -125,8 +130,8 @@ class OccupancyEngine:
                     "section_id": sec["id"],
                     "section_code": sec.get("section_id", f"SEC_{sec['id']}"),
                     "section_name": sec.get("name", f"Section {sec['id']}"),
-                    "from_station_code": sec.get("from_station_code"),
-                    "to_station_code": sec.get("to_station_code"),
+                    "from_station_code": m_from_code,
+                    "to_station_code": m_to_code,
                     "direction": direction,
                     "estimated_entry_min": norm_entry,
                     "estimated_exit_min": norm_exit,
@@ -191,6 +196,8 @@ class OccupancyEngine:
                         next_stop = s
                         break
                 direction = "DOWN"
+                m_from_code = sec.get("from_station_code")
+                m_to_code = sec.get("to_station_code")
             else:
                 # Reverse distance order along corridor: UP movement (↑ UP)
                 for s in sorted_stops:
@@ -201,6 +208,8 @@ class OccupancyEngine:
                         next_stop = s
                         break
                 direction = "UP"
+                m_from_code = sec.get("to_station_code")
+                m_to_code = sec.get("from_station_code")
 
             if prev_stop and next_stop and prev_stop["station_id"] != next_stop["station_id"]:
                 p_dist = float(prev_stop.get("distance_km", 0.0))
@@ -221,7 +230,8 @@ class OccupancyEngine:
 
                 raw_entry = int(p_dep + t_in_ratio * time_span)
                 raw_exit = max(raw_entry + nominal_transit_min, int(p_dep + t_out_ratio * time_span))
-                dur = max(1, raw_exit - raw_entry)
+                dur = max(1, min(120, raw_exit - raw_entry))
+                raw_exit = raw_entry + dur
 
                 norm_entry = raw_entry % 1440
                 norm_exit = norm_entry + dur
@@ -237,8 +247,8 @@ class OccupancyEngine:
                     "section_id": sec["id"],
                     "section_code": sec.get("section_id", f"SEC_{sec['id']}"),
                     "section_name": sec.get("name", f"Section {sec['id']}"),
-                    "from_station_code": sec.get("from_station_code"),
-                    "to_station_code": sec.get("to_station_code"),
+                    "from_station_code": m_from_code,
+                    "to_station_code": m_to_code,
                     "direction": direction,
                     "estimated_entry_min": norm_entry,
                     "estimated_exit_min": norm_exit,

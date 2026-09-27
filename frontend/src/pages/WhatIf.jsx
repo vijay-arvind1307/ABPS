@@ -65,11 +65,14 @@ export default function WhatIf() {
       {/* Header */}
       <div className="bg-white p-3 border border-slate-300 flex flex-wrap items-center justify-between gap-2 shadow-xs">
         <div>
-          <h2 className="font-bold text-sm text-[#0B2545] uppercase tracking-wide flex items-center gap-1.5">
+          <div className="text-[10px] text-slate-500 font-mono font-bold uppercase tracking-wider leading-none mb-1">
+            ABPS &mdash; Automatic Block Planning System
+          </div>
+          <h2 className="font-bold text-sm text-[#0B2545] uppercase tracking-wide flex items-center gap-1.5 leading-tight">
             <Cpu className="w-4 h-4 text-[#134074]" />
             WHAT-IF SCENARIO SIMULATION STUDIO
           </h2>
-          <p className="text-[11px] text-slate-500">
+          <p className="text-[11px] text-slate-500 mt-0.5">
             Sandbox simulation of operational disruptions (overrun duration, train congestion, emergency insertions) without altering live production schedules.
           </p>
         </div>

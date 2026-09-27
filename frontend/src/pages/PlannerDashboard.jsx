@@ -5,7 +5,7 @@ import {
   MapPin, Edit2, AlertTriangle, ArrowRight, Search, Train, Clock, Eye,
   BarChart3, GitBranch, Cpu, FileText, Database, Activity, ChevronRight,
   ChevronDown, Shield, Hash, Calendar, Target, Inbox, Bell, CheckCheck,
-  CheckSquare, Square, Sparkles, Users
+  CheckSquare, Square, Sparkles, Users, LogOut
 } from 'lucide-react';
 import {
   getBlockRequests,
@@ -27,6 +27,9 @@ import {
   whatIfCoordinatedBlockPlan,
   replanCoordinatedBlockPlan,
   getCoordinatedPlanAudit,
+  validateAlternativeWindow,
+  proposePlanModification,
+  getBlockPlanModifications,
   getMaintenanceJobs,
   getLiveTrainMovements,
   getTrainOccupancies,
@@ -63,7 +66,8 @@ import ExplainabilityDrawer from '../components/ExplainabilityDrawer';
 import ValidatorModal from '../components/ValidatorModal';
 import BlockPlanningDrawer from '../components/BlockPlanningDrawer';
 import RailwayControlWorkstation from '../components/RailwayControlWorkstation';
-import { getCurrentUser } from '../services/auth';
+import AppBrand from '../components/AppBrand';
+import { getCurrentUser, logoutUser } from '../services/auth';
 
 // ─── NAV STATION DEFINITIONS ────────────────────────────────────────
 const NAV_STATIONS = [
@@ -92,11 +96,22 @@ const mToTime = (m) => {
   return `${hh.toString().padStart(2, '0')}:${mm.toString().padStart(2, '0')}`;
 };
 
+const timeToM = (str) => {
+  if (!str) return null;
+  const parts = str.trim().split(':');
+  if (parts.length === 2) {
+    const h = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10);
+    if (!isNaN(h) && !isNaN(m)) return h * 60 + m;
+  }
+  return null;
+};
+
 export default function PlannerDashboard({ onTabChange }) {
   const user = getCurrentUser();
 
   // ── Core Data ────────────────────────────────────────────────
-  const [activeStation, setActiveStation] = useState('AUTOMATIC_BLOCK_PLANNING');
+  const [activeStation, setActiveStation] = useState('CONTROL_PANEL');
   const [jobs, setJobs] = useState([]);
   const [corridors, setCorridors] = useState([]);
   const [selectedCorridorId, setSelectedCorridorId] = useState(30);
@@ -196,6 +211,8 @@ export default function PlannerDashboard({ onTabChange }) {
   const [coordinatedModifyStart, setCoordinatedModifyStart] = useState(645);
   const [coordinatedModifyEnd, setCoordinatedModifyEnd] = useState(735);
   const [coordinatedModifyReason, setCoordinatedModifyReason] = useState('');
+  const [coordinatedModifyValidating, setCoordinatedModifyValidating] = useState(false);
+  const [coordinatedModifyValidationResult, setCoordinatedModifyValidationResult] = useState(null);
   const [showCoordinatedRejectModal, setShowCoordinatedRejectModal] = useState(false);
   const [coordinatedRejectReason, setCoordinatedRejectReason] = useState('');
   const [showCoordinatedWhatIfModal, setShowCoordinatedWhatIfModal] = useState(false);
@@ -227,6 +244,11 @@ export default function PlannerDashboard({ onTabChange }) {
   const [auditLogsLoading, setAuditLogsLoading] = useState(false);
 
   const isMountedRef = useRef(true);
+
+  const handlePlannerLogout = () => {
+    logoutUser();
+    window.location.reload();
+  };
 
   // ── DATA LOADING ─────────────────────────────────────────────
   const loadCoreData = useCallback(async (silent = false) => {
@@ -880,36 +902,173 @@ export default function PlannerDashboard({ onTabChange }) {
   };
 
   const handleOpenCoordinatedModify = (plan) => {
-    setCoordinatedModifyStart(plan.start_min || 645);
-    setCoordinatedModifyEnd(plan.end_min || 735);
-    setCoordinatedModifyReason('');
+    if (!plan) return;
+    setCoordinatedPlanResult(plan);
+    let startMin = plan.start_min;
+    let endMin = plan.end_min;
+    if ((startMin === undefined || startMin === null) && plan.common_block_window) {
+      const parts = plan.common_block_window.split(/[-–]/);
+      if (parts.length >= 2) {
+        startMin = timeToM(parts[0].trim());
+        endMin = timeToM(parts[1].trim());
+      }
+    }
+    setCoordinatedModifyStart(startMin ?? 645);
+    setCoordinatedModifyEnd(endMin ?? 735);
+    setCoordinatedModifyReason(plan.modification_reason || '');
+    setCoordinatedModifyValidating(false);
+    setCoordinatedModifyValidationResult(null);
     setShowCoordinatedModifyModal(true);
+  };
+
+  const handleValidateAlternative = async () => {
+    const startM = parseInt(coordinatedModifyStart, 10);
+    const endM = parseInt(coordinatedModifyEnd, 10);
+    if (isNaN(startM) || isNaN(endM) || endM <= startM) {
+      alert('Valid timings required: End time must be after start time.');
+      return;
+    }
+    setCoordinatedModifyValidating(true);
+    setCoordinatedModifyValidationResult(null);
+    try {
+      const planId = coordinatedPlanResult?.id || coordinatedPlanResult?.plan_id;
+      const res = await validateAlternativeWindow({
+        start_min: startM,
+        end_min: endM,
+        duration_min: endM - startM,
+        section_id: coordinatedPlanResult?.section_id
+      }, planId);
+      setCoordinatedModifyValidationResult(res.data);
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      const msg = typeof detail === 'string' ? detail : (detail?.message || 'Validation request failed.');
+      setCoordinatedModifyValidationResult({
+        is_feasible: false,
+        status: 'INFEASIBLE',
+        message: msg
+      });
+    } finally {
+      setCoordinatedModifyValidating(false);
+    }
   };
 
   const handleCoordinatedModifySubmit = async (e) => {
     if (e) e.preventDefault();
     if (!coordinatedModifyReason.trim()) {
-      alert('Mandatory modification reason is required.');
+      alert('Mandatory operational justification required to modify plan.');
       return;
     }
+    const startM = parseInt(coordinatedModifyStart, 10);
+    const endM = parseInt(coordinatedModifyEnd, 10);
+    if (isNaN(startM) || isNaN(endM) || endM <= startM) {
+      alert('Valid timings required: End time must be after start time.');
+      return;
+    }
+
     try {
-      const planId = coordinatedPlanResult.id || coordinatedPlanResult.plan_id;
-      const res = await modifyCoordinatedBlockPlan(planId, {
-        reason: coordinatedModifyReason.trim(),
-        recommended_start_min: parseInt(coordinatedModifyStart),
-        recommended_end_min: parseInt(coordinatedModifyEnd)
+      const planId = coordinatedPlanResult?.id || coordinatedPlanResult?.plan_id;
+      let resData = null;
+      if (planId && typeof planId === 'number') {
+        try {
+          const res = await proposePlanModification(planId, {
+            reason: coordinatedModifyReason.trim(),
+            recommended_start_min: startM,
+            recommended_end_min: endM
+          });
+          resData = res.data;
+        } catch (apiErr) {
+          const detail = apiErr.response?.data?.detail;
+          const msg = typeof detail === 'string' ? detail : (detail?.message || 'Modification proposal rejected due to conflict.');
+          alert(`ALTERNATIVE TIME NOT FEASIBLE:\n${msg}`);
+          return;
+        }
+      }
+
+      const newWindow = `${mToTime(startM)} – ${mToTime(endM)}`;
+      const newDuration = endM - startM;
+
+      // Update in poolOptimizationResult.plans
+      setPoolOptimizationResult(prev => {
+        if (!prev || !prev.plans) return prev;
+        return {
+          ...prev,
+          plans: prev.plans.map(p => {
+            const isMatch = (planId && (p.id === planId || p.plan_id === planId)) ||
+              (p.plan_title && p.plan_title === coordinatedPlanResult?.plan_title) ||
+              (p.plan_code && p.plan_code === coordinatedPlanResult?.plan_code);
+            if (!isMatch) return p;
+            return {
+              ...p,
+              status: 'MODIFICATION_REQUESTED',
+              start_min: startM,
+              end_min: endM,
+              common_block_window: newWindow,
+              total_possession_duration_min: newDuration,
+              duration_min: newDuration,
+              modification_reason: coordinatedModifyReason.trim(),
+              modification_overall_status: 'WAITING_FOR_RESPONSES'
+            };
+          })
+        };
       });
+
+      // Update selectedPlanForDecision
+      setSelectedPlanForDecision(prev => {
+        if (!prev) return prev;
+        const isMatch = (planId && (prev.id === planId || prev.plan_id === planId)) ||
+          (prev.plan_title && prev.plan_title === coordinatedPlanResult?.plan_title) ||
+          (prev.plan_code && prev.plan_code === coordinatedPlanResult?.plan_code);
+        if (!isMatch) return prev;
+        return {
+          ...prev,
+          status: 'MODIFICATION_REQUESTED',
+          start_min: startM,
+          end_min: endM,
+          common_block_window: newWindow,
+          total_possession_duration_min: newDuration,
+          duration_min: newDuration,
+          modification_reason: coordinatedModifyReason.trim(),
+          modification_overall_status: 'WAITING_FOR_RESPONSES'
+        };
+      });
+
+      // Update activePlanModal
+      if (activePlanModal) {
+        setActivePlanModal(prev => ({
+          ...prev,
+          status: 'MODIFICATION_REQUESTED',
+          start_min: startM,
+          end_min: endM,
+          common_block_window: newWindow,
+          total_possession_duration_min: newDuration,
+          duration_min: newDuration,
+          modification_reason: coordinatedModifyReason.trim(),
+          modification_overall_status: 'WAITING_FOR_RESPONSES'
+        }));
+      }
+
       setShowCoordinatedModifyModal(false);
-      setCoordinatedPlanResult(res.data);
-      alert('Coordinated block schedule modified and recorded in audit trail.');
+      setCoordinatedPlanResult(resData || {
+        ...coordinatedPlanResult,
+        status: 'MODIFICATION_REQUESTED',
+        start_min: startM,
+        end_min: endM,
+        common_block_window: newWindow,
+        duration_min: newDuration,
+        modification_reason: coordinatedModifyReason.trim(),
+        modification_overall_status: 'WAITING_FOR_RESPONSES'
+      });
+      alert(`Plan modification proposed: Alternative window (${newWindow}) sent to affected department(s) under MODIFICATION REQUESTED.`);
       loadCoreData(true);
     } catch (err) {
-      alert(err.response?.data?.detail || 'Modification failed.');
+      console.error('Coordinated modify error:', err);
     }
   };
 
   const handleOpenCoordinatedReject = (plan) => {
-    setCoordinatedRejectReason('');
+    if (!plan) return;
+    setCoordinatedPlanResult(plan);
+    setCoordinatedRejectReason(plan.rejection_reason || '');
     setShowCoordinatedRejectModal(true);
   };
 
@@ -920,10 +1079,51 @@ export default function PlannerDashboard({ onTabChange }) {
       return;
     }
     try {
-      const planId = coordinatedPlanResult.id || coordinatedPlanResult.plan_id;
-      const res = await rejectCoordinatedBlockPlan(planId, {
-        reason: coordinatedRejectReason.trim()
+      const planId = coordinatedPlanResult?.id || coordinatedPlanResult?.plan_id;
+      if (planId && typeof planId === 'number') {
+        try {
+          await rejectCoordinatedBlockPlan(planId, {
+            reason: coordinatedRejectReason.trim()
+          });
+        } catch (apiErr) {
+          console.warn('API rejection request failed, updating local plan state:', apiErr);
+        }
+      }
+
+      // Update poolOptimizationResult plans list
+      setPoolOptimizationResult(prev => {
+        if (!prev || !prev.plans) return prev;
+        return {
+          ...prev,
+          plans: prev.plans.map(p => {
+            const isMatch = (planId && (p.id === planId || p.plan_id === planId)) ||
+              (p.plan_title && p.plan_title === coordinatedPlanResult?.plan_title) ||
+              (p.plan_code && p.plan_code === coordinatedPlanResult?.plan_code);
+            if (!isMatch) return p;
+            return {
+              ...p,
+              status: 'REJECTED',
+              rejection_reason: coordinatedRejectReason.trim()
+            };
+          })
+        };
       });
+
+      if (selectedPlanForDecision) {
+        setSelectedPlanForDecision(prev => {
+          if (!prev) return prev;
+          const isMatch = (planId && (prev.id === planId || prev.plan_id === planId)) ||
+            (prev.plan_title && prev.plan_title === coordinatedPlanResult?.plan_title) ||
+            (prev.plan_code && prev.plan_code === coordinatedPlanResult?.plan_code);
+          if (!isMatch) return prev;
+          return { ...prev, status: 'REJECTED', rejection_reason: coordinatedRejectReason.trim() };
+        });
+      }
+
+      if (activePlanModal) {
+        setActivePlanModal(prev => ({ ...prev, status: 'REJECTED', rejection_reason: coordinatedRejectReason.trim() }));
+      }
+
       setShowCoordinatedRejectModal(false);
       setCoordinatedPlanResult(null);
       alert('Coordinated common block REJECTED. All combined requests restored to pending queue for individual scheduling.');
@@ -1043,8 +1243,8 @@ export default function PlannerDashboard({ onTabChange }) {
     }
   };
 
-  const handleDecisionAction = (action) => {
-    const targetPlan = selectedPlanForDecision || (poolOptimizationResult?.plans && poolOptimizationResult.plans[0]) || (activePlan ? {
+  const handleDecisionAction = (action, specificPlan = null) => {
+    const targetPlan = specificPlan || selectedPlanForDecision || (poolOptimizationResult?.plans && poolOptimizationResult.plans[0]) || (activePlan ? {
       id: activePlan.id,
       plan_id: activePlan.plan_id || 'BP-001',
       plan_title: activePlan.plan_title || 'PLAN BP-001',
@@ -1281,21 +1481,14 @@ export default function PlannerDashboard({ onTabChange }) {
     const activeDecisionPlan = selectedPlanForDecision || (generatedPlans.length > 0 ? generatedPlans[0] : null);
 
     return (
-      <div className="space-y-3 font-sans">
-        {/* ── 1. HEADER ────────────────────────────────────────── */}
-        <div className="bg-[#0B2545] border-b-2 border-[#FFB703] p-2.5 px-3.5 text-white flex flex-wrap items-center justify-between shadow-xs">
-          <div>
-            <div className="text-[10px] text-[#FFB703] font-mono font-bold uppercase tracking-wider">
-              INDIAN RAILWAYS &bull; AUTOMATIC BLOCK PLANNING SYSTEM
-            </div>
-            <div className="text-xs text-slate-300 font-mono">
-              SIH26027 &bull; Automatic Block Planning System
-            </div>
-          </div>
-          <div className="flex items-center gap-3 text-xs">
-            <div className="bg-[#134074] border border-slate-600 px-3 py-1 text-right">
-              <span className="text-[9px] text-slate-400 block uppercase font-bold">Role:</span>
-              <span className="text-xs font-black text-[#FFB703] font-mono">
+      <div className="w-full space-y-3 font-sans">
+        {/* ── 1. HEADER (System Title Block) ──────────────────── */}
+        <div className="w-full bg-[#0B2545] border-b-2 border-[#FFB703] px-4 py-2 text-white flex items-center justify-between shadow-xs">
+          <AppBrand variant="header" logoHeight="56px" />
+          <div className="flex items-center">
+            <div className="bg-[#134074] border border-slate-600 px-3 py-1 flex items-center gap-2">
+              <span className="text-[9px] text-slate-300 uppercase font-bold tracking-wider leading-none">Role:</span>
+              <span className="text-xs font-black text-[#FFB703] font-mono leading-none">
                 CHIEF SECTION CONTROLLER / RAILWAY PLANNER
               </span>
             </div>
@@ -1303,20 +1496,24 @@ export default function PlannerDashboard({ onTabChange }) {
         </div>
 
         {/* ── 2. PAGE TITLE & COMPACT LIVE TRAIN REFERENCE ─────── */}
-        <div className="bg-white border border-slate-300 p-3 flex flex-wrap items-center justify-between gap-3 shadow-xs">
-          <div>
-            <h1 className="text-base font-black text-[#0B2545] uppercase tracking-wide flex items-center gap-2">
-              <Activity className="w-4 h-4 text-[#134074]" />
-              RAILWAY PLANNER CONTROL ROOM
-            </h1>
-            <p className="text-xs text-slate-500 mt-0.5 font-medium">
-              Centralized maintenance demand planning and block optimization
-            </p>
+        <div className="w-full bg-white border border-slate-300 px-4 py-3 flex items-center justify-between shadow-xs">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 bg-slate-100 border border-slate-300 flex items-center justify-center shrink-0 text-[#134074]">
+              <Activity className="w-5 h-5" />
+            </div>
+            <div className="flex flex-col justify-center">
+              <h1 className="text-sm font-black text-[#0B2545] uppercase tracking-wide leading-tight flex items-center gap-2">
+                RAILWAY PLANNER CONTROL ROOM
+              </h1>
+              <p className="text-xs text-slate-500 font-medium leading-tight mt-0.5">
+                Centralized maintenance demand planning and block optimization
+              </p>
+            </div>
           </div>
           <div className="flex items-center gap-3">
-            {/* Very small live train status/reference (as requested) */}
-            <div className="bg-slate-50 border border-slate-300 px-2.5 py-1 text-[11px] font-mono text-slate-700 flex items-center gap-1.5 shadow-xs">
-              <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
+            {/* Live train status reference */}
+            <div className="h-8 bg-slate-50 border border-slate-300 px-3 flex items-center gap-1.5 text-[11px] font-mono text-slate-700 shadow-xs">
+              <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse shrink-0" />
               <span className="font-bold">LIVE TRAIN DATA:</span>
               <span className="text-slate-500">Available on</span>
               <button
@@ -1329,62 +1526,101 @@ export default function PlannerDashboard({ onTabChange }) {
             </div>
             <button
               onClick={() => loadCoreData(true)}
-              className="bg-[#0B2545] hover:bg-[#134074] text-white font-black px-2.5 py-1 text-xs uppercase flex items-center gap-1 border border-slate-700 cursor-pointer shadow-xs transition-colors"
+              className="h-8 bg-[#0B2545] hover:bg-[#134074] text-white font-black px-3 text-xs uppercase flex items-center gap-1.5 border border-slate-700 cursor-pointer shadow-xs transition-colors shrink-0"
             >
-              <RefreshCw className="w-3 h-3 text-[#FFB703]" /> SYNC FEED
+              <RefreshCw className="w-3.5 h-3.5 text-[#FFB703]" />
+              <span>SYNC FEED</span>
             </button>
           </div>
         </div>
 
-        {/* ── 3. SUMMARY STRIP (Compact Horizontal Area) ──────── */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-          <div className="bg-white border border-slate-300 border-l-4 border-l-amber-500 p-2 shadow-xs">
-            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">PENDING REQUESTS</div>
-            <div className="text-2xl font-black font-mono text-[#0B2545] my-0.5">{pendingCount}</div>
-            <div className="text-[9px] text-slate-400 font-mono">In Queue</div>
+        {/* ── 3. SUMMARY STRIP (Strict Equal-Column Grid) ──────── */}
+        <div className="w-full grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+          <div className="h-[84px] bg-white border border-slate-300 border-l-4 border-l-amber-500 p-2.5 flex flex-col justify-between shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight h-3.5 leading-3.5 truncate">
+              PENDING REQUESTS
+            </div>
+            <div className="text-2xl font-black font-mono text-[#0B2545] leading-none my-0.5">
+              {pendingCount}
+            </div>
+            <div className="text-[9px] text-slate-400 font-mono h-3 leading-3 truncate">
+              In Queue
+            </div>
           </div>
-          <div className="bg-white border border-slate-300 border-l-4 border-l-blue-600 p-2 shadow-xs">
-            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">REQUESTS ANALYZED</div>
-            <div className="text-2xl font-black font-mono text-[#0B2545] my-0.5">{requestsAnalyzedCount}</div>
-            <div className="text-[9px] text-slate-400 font-mono">Evaluated</div>
+          <div className="h-[84px] bg-white border border-slate-300 border-l-4 border-l-blue-600 p-2.5 flex flex-col justify-between shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight h-3.5 leading-3.5 truncate">
+              REQUESTS ANALYZED
+            </div>
+            <div className="text-2xl font-black font-mono text-[#0B2545] leading-none my-0.5">
+              {requestsAnalyzedCount}
+            </div>
+            <div className="text-[9px] text-slate-400 font-mono h-3 leading-3 truncate">
+              Evaluated
+            </div>
           </div>
-          <div className="bg-white border border-slate-300 border-l-4 border-l-emerald-600 p-2 shadow-xs">
-            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">COORDINATED JOBS</div>
-            <div className="text-2xl font-black font-mono text-emerald-700 my-0.5">{coordinatedCount}</div>
-            <div className="text-[9px] text-slate-400 font-mono">Combined</div>
+          <div className="h-[84px] bg-white border border-slate-300 border-l-4 border-l-emerald-600 p-2.5 flex flex-col justify-between shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight h-3.5 leading-3.5 truncate">
+              COORDINATED JOBS
+            </div>
+            <div className="text-2xl font-black font-mono text-emerald-700 leading-none my-0.5">
+              {coordinatedCount}
+            </div>
+            <div className="text-[9px] text-slate-400 font-mono h-3 leading-3 truncate">
+              Combined
+            </div>
           </div>
-          <div className="bg-white border border-slate-300 border-l-4 border-l-cyan-600 p-2 shadow-xs">
-            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">OPTIMIZED BLOCKS</div>
-            <div className="text-2xl font-black font-mono text-cyan-800 my-0.5">{optimizedBlocksCount}</div>
-            <div className="text-[9px] text-slate-400 font-mono">Generated Plans</div>
+          <div className="h-[84px] bg-white border border-slate-300 border-l-4 border-l-cyan-600 p-2.5 flex flex-col justify-between shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight h-3.5 leading-3.5 truncate">
+              OPTIMIZED BLOCKS
+            </div>
+            <div className="text-2xl font-black font-mono text-cyan-800 leading-none my-0.5">
+              {optimizedBlocksCount}
+            </div>
+            <div className="text-[9px] text-slate-400 font-mono h-3 leading-3 truncate">
+              Generated Plans
+            </div>
           </div>
-          <div className="bg-white border border-slate-300 border-l-4 border-l-emerald-500 p-2 shadow-xs">
-            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">CONFLICTS</div>
-            <div className="text-2xl font-black font-mono text-emerald-600 my-0.5">0</div>
-            <div className="text-[9px] text-slate-400 font-mono">0 Hard Conflicts</div>
+          <div className="h-[84px] bg-white border border-slate-300 border-l-4 border-l-emerald-500 p-2.5 flex flex-col justify-between shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight h-3.5 leading-3.5 truncate">
+              CONFLICTS
+            </div>
+            <div className="text-2xl font-black font-mono text-emerald-600 leading-none my-0.5">
+              0
+            </div>
+            <div className="text-[9px] text-slate-400 font-mono h-3 leading-3 truncate">
+              0 Hard Conflicts
+            </div>
           </div>
-          <div className="bg-white border border-slate-300 border-l-4 border-l-indigo-600 p-2 shadow-xs">
-            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight">AVAILABLE WINDOWS</div>
-            <div className="text-2xl font-black font-mono text-[#0B2545] my-0.5">{availableWindowsCount}</div>
-            <div className="text-[9px] text-slate-400 font-mono">Feasible Slots</div>
+          <div className="h-[84px] bg-white border border-slate-300 border-l-4 border-l-indigo-600 p-2.5 flex flex-col justify-between shadow-xs">
+            <div className="text-[10px] font-black text-slate-500 uppercase tracking-tight h-3.5 leading-3.5 truncate">
+              AVAILABLE WINDOWS
+            </div>
+            <div className="text-2xl font-black font-mono text-[#0B2545] leading-none my-0.5">
+              {availableWindowsCount}
+            </div>
+            <div className="text-[9px] text-slate-400 font-mono h-3 leading-3 truncate">
+              Feasible Slots
+            </div>
           </div>
         </div>
 
         {/* ── 4. MAINTENANCE REQUEST QUEUE (Primary Section) ──── */}
-        <div className="bg-white border border-slate-300 shadow-xs">
-          <div className="bg-[#F8FAFC] border-b border-slate-300 p-2.5 px-3 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Inbox className="w-4 h-4 text-[#134074]" />
-              <h2 className="font-black text-xs text-[#0B2545] uppercase tracking-wider">
-                MAINTENANCE REQUEST QUEUE
+        <div className="w-full bg-white border border-slate-300 shadow-xs">
+          <div className="bg-[#F8FAFC] border-b border-slate-300 px-4 py-2.5 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-5 h-5 flex items-center justify-center shrink-0">
+                <Inbox className="w-4 h-4 text-[#134074]" />
+              </div>
+              <h2 className="font-black text-xs text-[#0B2545] uppercase tracking-wider flex items-center gap-2">
+                <span>MAINTENANCE REQUEST QUEUE</span>
+                <span className="text-[10px] font-mono font-bold bg-slate-200 text-slate-700 px-2 py-0.5 border border-slate-300">
+                  {jobs.length} Demands Loaded
+                </span>
               </h2>
-              <span className="text-[10px] font-mono font-bold bg-slate-200 text-slate-700 px-2 py-0.5">
-                {jobs.length} Demands Loaded
-              </span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5">
               {selectedRequestIds.length > 0 && (
-                <span className="text-[11px] font-mono text-amber-900 bg-amber-100 px-2 py-1 font-bold border border-amber-300">
+                <span className="h-7 text-[11px] font-mono text-amber-900 bg-amber-100 px-2.5 flex items-center font-bold border border-amber-300">
                   {selectedRequestIds.length} Selected
                 </span>
               )}
@@ -1392,46 +1628,61 @@ export default function PlannerDashboard({ onTabChange }) {
                 id="btn-header-optimize"
                 onClick={() => handleRunPoolOptimization()}
                 disabled={poolOptimizing}
-                className="bg-[#0B2545] hover:bg-[#134074] text-[#FFB703] border-2 border-[#FFB703] font-black px-4 py-1.5 text-xs uppercase flex items-center gap-1.5 cursor-pointer shadow-sm transition-colors"
+                className="h-7 bg-[#0B2545] hover:bg-[#134074] text-[#FFB703] border-2 border-[#FFB703] font-black px-3.5 text-xs uppercase flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors shrink-0"
                 title="Analyze all eligible pending requests and generate coordinated block plans"
               >
-                <Cpu className={`w-4 h-4 text-[#FFB703] ${poolOptimizing ? 'animate-spin' : ''}`} />
+                <Cpu className={`w-3.5 h-3.5 text-[#FFB703] ${poolOptimizing ? 'animate-spin' : ''}`} />
                 <span>OPTIMIZE REQUESTS</span>
               </button>
             </div>
           </div>
 
-          <div className="overflow-x-auto max-h-72 border-b border-slate-200">
-            <table className="cris-table w-full text-[11px]">
+          <div className="w-full overflow-x-auto">
+            <table className="w-full border-collapse border border-slate-300 text-[11px] table-fixed">
+              <colgroup>
+                <col className="w-9" />
+                <col className="w-24" />
+                <col className="w-28" />
+                <col className="w-40" />
+                <col className="w-28" />
+                <col className="w-28" />
+                <col className="w-24" />
+                <col className="w-20" />
+                <col className="w-20" />
+                <col className="w-24" />
+                <col className="w-24" />
+                <col className="w-32" />
+                <col className="w-20" />
+              </colgroup>
               <thead>
-                <tr>
-                  <th className="w-8 text-center">
+                <tr className="bg-[#0B2545] text-white">
+                  <th className="py-2 px-2 border border-slate-500 text-center font-semibold text-[11px] uppercase tracking-wider">
                     <input
                       type="checkbox"
-                      checked={selectedRequestIds.length > 0 && selectedRequestIds.length === jobs.length}
+                      checked={jobs.length > 0 && selectedRequestIds.length === jobs.length}
                       onChange={handleSelectAllPending}
                       title="Select / Deselect all for coordination"
                       className="cursor-pointer"
                     />
                   </th>
-                  <th>REQUEST ID</th>
-                  <th>DEPARTMENT</th>
-                  <th>WORK TYPE</th>
-                  <th>CORRIDOR</th>
-                  <th>SECTION</th>
-                  <th>DATE</th>
-                  <th>DURATION</th>
-                  <th>PRIORITY</th>
-                  <th>DUE DATE</th>
-                  <th>STATUS</th>
-                  <th>COORDINATION</th>
-                  <th className="text-center">ACTIONS</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">REQUEST ID</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">DEPARTMENT</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">WORK TYPE</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">CORRIDOR</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">SECTION</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">DATE</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">DURATION</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">PRIORITY</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">DUE DATE</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">STATUS</th>
+                  <th className="py-2 px-2 border border-slate-500 text-left font-semibold text-[11px] uppercase tracking-wider truncate">COORDINATION</th>
+                  <th className="py-2 px-2 border border-slate-500 text-center font-semibold text-[11px] uppercase tracking-wider truncate">ACTIONS</th>
                 </tr>
               </thead>
               <tbody>
                 {jobs.length === 0 ? (
                   <tr>
-                    <td colSpan="13" className="text-center py-6 text-slate-500 font-mono text-xs">
+                    <td colSpan={13} className="py-10 text-center text-slate-500 font-mono text-xs uppercase tracking-wider bg-slate-50/50 border border-slate-200">
                       NO ACTIVE BLOCK REQUESTS IN QUEUE
                     </td>
                   </tr>
@@ -1442,15 +1693,15 @@ export default function PlannerDashboard({ onTabChange }) {
                     return (
                       <tr
                         key={j.id}
-                        className={`cursor-pointer transition-colors ${isChecked
+                        className={`h-9 cursor-pointer transition-colors ${isChecked
                             ? 'bg-amber-50 font-medium'
                             : isSelected
                               ? 'bg-amber-100/80 font-bold border-l-4 border-l-[#FFB703]'
-                              : 'hover:bg-slate-50'
+                              : 'hover:bg-slate-50 bg-white'
                           }`}
                         onClick={() => { setActiveRequestDetailsModal(j); setSelectedRequest(j); }}
                       >
-                        <td className="text-center" onClick={(e) => e.stopPropagation()}>
+                        <td className="text-center border border-slate-200 px-2 py-1.5" onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
                             checked={isChecked}
@@ -1458,24 +1709,24 @@ export default function PlannerDashboard({ onTabChange }) {
                             className="cursor-pointer"
                           />
                         </td>
-                        <td className="font-mono font-bold text-slate-900">{j.job_code}</td>
-                        <td>
+                        <td className="font-mono font-bold text-slate-900 border border-slate-200 px-2 py-1.5 truncate">{j.job_code}</td>
+                        <td className="border border-slate-200 px-2 py-1.5 truncate">
                           <span className="font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 border text-[10px]">
                             {j.department?.name || j.department?.code || 'Engineering'}
                           </span>
                         </td>
-                        <td className="text-slate-800 font-semibold max-w-[130px] truncate" title={j.work_title || j.work_type}>
+                        <td className="text-slate-800 font-semibold border border-slate-200 px-2 py-1.5 truncate" title={j.work_title || j.work_type}>
                           {j.work_title || j.work_type}
                         </td>
-                        <td className="font-mono font-bold text-[#134074]">
+                        <td className="font-mono font-bold text-[#134074] border border-slate-200 px-2 py-1.5 truncate">
                           {j.start_station_code || 'CVP'} → {j.end_station_code || 'TEN'}
                         </td>
-                        <td className="font-mono text-[10px] text-slate-800">
+                        <td className="font-mono text-[10px] text-slate-800 border border-slate-200 px-2 py-1.5 truncate">
                           {j.section?.section_id || j.section?.section_code || j.section_name || 'SECTION-103'}
                         </td>
-                        <td className="font-mono text-slate-700">{j.requested_date || (j.created_at ? j.created_at.slice(0, 10) : '17 Sep 2026')}</td>
-                        <td className="font-mono font-semibold">{j.estimated_duration_min || j.duration_min || 90}m</td>
-                        <td>
+                        <td className="font-mono text-slate-700 border border-slate-200 px-2 py-1.5 truncate">{j.requested_date || (j.created_at ? j.created_at.slice(0, 10) : '17 Sep 2026')}</td>
+                        <td className="font-mono font-semibold border border-slate-200 px-2 py-1.5 truncate">{j.estimated_duration_min || j.duration_min || 90}m</td>
+                        <td className="border border-slate-200 px-2 py-1.5 truncate">
                           <div className="flex items-center gap-1">
                             {getPriorityBadge(j.user_priority)}
                             <span className="font-mono text-[10px] text-slate-600">
@@ -1483,14 +1734,14 @@ export default function PlannerDashboard({ onTabChange }) {
                             </span>
                           </div>
                         </td>
-                        <td className="font-mono text-slate-600">{j.due_date ? j.due_date.slice(0, 10) : '20 Sep 2026'}</td>
-                        <td>{getStatusBadge(j.status)}</td>
-                        <td>
+                        <td className="font-mono text-slate-600 border border-slate-200 px-2 py-1.5 truncate">{j.due_date ? j.due_date.slice(0, 10) : '20 Sep 2026'}</td>
+                        <td className="border border-slate-200 px-2 py-1.5 truncate">{getStatusBadge(j.status)}</td>
+                        <td className="border border-slate-200 px-2 py-1.5 truncate">
                           <span className="bg-blue-50 text-blue-800 border border-blue-200 px-1.5 py-0.5 text-[9px] font-bold uppercase">
                             Eligible
                           </span>
                         </td>
-                        <td className="text-center" onClick={(e) => e.stopPropagation()}>
+                        <td className="text-center border border-slate-200 px-2 py-1.5 truncate" onClick={(e) => e.stopPropagation()}>
                           <button
                             onClick={() => { setActiveRequestDetailsModal(j); setSelectedRequest(j); }}
                             className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 text-[10px] font-bold uppercase cursor-pointer"
@@ -1508,22 +1759,26 @@ export default function PlannerDashboard({ onTabChange }) {
         </div>
 
         {/* ── 5. OPTIMIZATION WORKSPACE ───────────────────────── */}
-        <div className="bg-white border border-slate-300 p-3 shadow-xs space-y-3">
-          <div className="flex flex-wrap items-center justify-between border-b border-slate-200 pb-2 gap-2">
-            <div>
-              <h3 className="font-black text-xs text-[#0B2545] uppercase tracking-wider flex items-center gap-1.5">
-                <Cpu className="w-4 h-4 text-[#134074]" />
-                OPTIMIZATION WORKSPACE
-              </h3>
-              <span className="text-[10px] font-mono text-slate-500">
-                Mathematical CP-SAT Section & Time-Slot Optimizer
-              </span>
+        <div className="w-full bg-white border border-slate-300 p-4 shadow-xs space-y-3">
+          <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 bg-slate-100 border border-slate-300 flex items-center justify-center shrink-0 text-[#134074]">
+                <Cpu className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-black text-xs text-[#0B2545] uppercase tracking-wider leading-tight">
+                  OPTIMIZATION WORKSPACE
+                </h3>
+                <span className="text-[10px] font-mono text-slate-500 leading-tight block mt-0.5">
+                  Mathematical CP-SAT Section &amp; Time-Slot Optimizer
+                </span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5">
               <button
                 onClick={() => handleRunPoolOptimization(selectedRequestIds.length > 0 ? selectedRequestIds : null)}
                 disabled={poolOptimizing || selectedRequestIds.length === 0}
-                className="bg-slate-100 hover:bg-slate-200 text-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-bold px-3 py-1.5 text-xs uppercase flex items-center gap-1 border border-slate-300 cursor-pointer transition-colors"
+                className="h-8 bg-slate-100 hover:bg-slate-200 text-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-bold px-3 text-xs uppercase flex items-center gap-1.5 border border-slate-300 cursor-pointer transition-colors shrink-0"
               >
                 <CheckSquare className="w-3.5 h-3.5 text-slate-600" />
                 <span>OPTIMIZE SELECTED ({selectedRequestIds.length})</span>
@@ -1532,35 +1787,55 @@ export default function PlannerDashboard({ onTabChange }) {
                 id="btn-workspace-optimize"
                 onClick={() => handleRunPoolOptimization()}
                 disabled={poolOptimizing}
-                className="bg-[#0B2545] hover:bg-[#134074] text-[#FFB703] font-black px-4 py-1.5 text-xs uppercase flex items-center gap-1.5 border-2 border-[#FFB703] cursor-pointer shadow-sm transition-colors"
+                className="h-8 bg-[#0B2545] hover:bg-[#134074] text-[#FFB703] font-black px-3.5 text-xs uppercase flex items-center gap-1.5 border-2 border-[#FFB703] cursor-pointer shadow-xs transition-colors shrink-0"
               >
-                <Cpu className={`w-4 h-4 ${poolOptimizing ? 'animate-spin' : ''}`} />
+                <Cpu className={`w-3.5 h-3.5 ${poolOptimizing ? 'animate-spin' : ''}`} />
                 <span>OPTIMIZE REQUESTS</span>
               </button>
             </div>
           </div>
 
-          {/* Status Metrics Strip matching Prompt */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono text-xs">
-            <div className="p-2 bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-500 uppercase block">Requests analyzed:</span>
-              <strong className="text-sm text-[#0B2545]">{requestsAnalyzedCount}</strong>
+          {/* Strict Equal-Column 5-Metric Grid */}
+          <div className="w-full grid grid-cols-2 sm:grid-cols-5 gap-2.5 font-mono text-xs">
+            <div className="h-[58px] p-2.5 bg-slate-50 border border-slate-200 flex flex-col justify-between">
+              <span className="text-[10px] text-slate-500 uppercase font-mono tracking-wider h-3.5 leading-3.5 truncate">
+                Requests analyzed:
+              </span>
+              <strong className="text-base font-black text-[#0B2545] leading-none">
+                {requestsAnalyzedCount}
+              </strong>
             </div>
-            <div className="p-2 bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-500 uppercase block">Compatible groups found:</span>
-              <strong className="text-sm text-emerald-700">{compatibleGroupsCount}</strong>
+            <div className="h-[58px] p-2.5 bg-slate-50 border border-slate-200 flex flex-col justify-between">
+              <span className="text-[10px] text-slate-500 uppercase font-mono tracking-wider h-3.5 leading-3.5 truncate">
+                Compatible groups found:
+              </span>
+              <strong className="text-base font-black text-emerald-700 leading-none">
+                {compatibleGroupsCount}
+              </strong>
             </div>
-            <div className="p-2 bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-500 uppercase block">Individual plans:</span>
-              <strong className="text-sm text-blue-700">{individualPlansCount}</strong>
+            <div className="h-[58px] p-2.5 bg-slate-50 border border-slate-200 flex flex-col justify-between">
+              <span className="text-[10px] text-slate-500 uppercase font-mono tracking-wider h-3.5 leading-3.5 truncate">
+                Individual plans:
+              </span>
+              <strong className="text-base font-black text-blue-700 leading-none">
+                {individualPlansCount}
+              </strong>
             </div>
-            <div className="p-2 bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-500 uppercase block">Conflicts detected:</span>
-              <strong className="text-sm text-emerald-600">0</strong>
+            <div className="h-[58px] p-2.5 bg-slate-50 border border-slate-200 flex flex-col justify-between">
+              <span className="text-[10px] text-slate-500 uppercase font-mono tracking-wider h-3.5 leading-3.5 truncate">
+                Conflicts detected:
+              </span>
+              <strong className="text-base font-black text-emerald-600 leading-none">
+                0
+              </strong>
             </div>
-            <div className="p-2 bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-500 uppercase block">Available windows:</span>
-              <strong className="text-sm text-[#0B2545]">{availableWindowsCount}</strong>
+            <div className="h-[58px] p-2.5 bg-slate-50 border border-slate-200 flex flex-col justify-between">
+              <span className="text-[10px] text-slate-500 uppercase font-mono tracking-wider h-3.5 leading-3.5 truncate">
+                Available windows:
+              </span>
+              <strong className="text-base font-black text-[#0B2545] leading-none">
+                {availableWindowsCount}
+              </strong>
             </div>
           </div>
 
@@ -1621,16 +1896,21 @@ export default function PlannerDashboard({ onTabChange }) {
         </div>
 
         {/* ── 6. GENERATED BLOCK PLANS ────────────────────────── */}
-        <div className="bg-white border border-slate-300 p-3 shadow-xs space-y-3">
-          <div className="flex flex-wrap items-center justify-between border-b border-slate-200 pb-2">
-            <div className="flex items-center gap-2">
-              <Layers className="w-4 h-4 text-[#134074]" />
-              <h2 className="font-black text-xs text-[#0B2545] uppercase tracking-wider">
-                GENERATED BLOCK PLANS ({generatedPlans.length})
+        <div className="w-full bg-white border border-slate-300 p-4 shadow-xs space-y-3">
+          <div className="flex items-center justify-between border-b border-slate-200 pb-2.5">
+            <div className="flex items-center gap-2.5">
+              <div className="w-5 h-5 flex items-center justify-center shrink-0">
+                <Layers className="w-4 h-4 text-[#134074]" />
+              </div>
+              <h2 className="font-black text-xs text-[#0B2545] uppercase tracking-wider flex items-center gap-2">
+                <span>GENERATED BLOCK PLANS</span>
+                <span className="text-[10px] font-mono font-bold bg-slate-200 text-slate-700 px-2 py-0.5 border border-slate-300">
+                  {generatedPlans.length}
+                </span>
               </h2>
             </div>
-            <span className="text-[10px] font-mono text-slate-500">
-              Review CP-SAT optimized schedules & authorize possession
+            <span className="text-[11px] font-mono text-slate-500">
+              Review CP-SAT optimized schedules &amp; authorize possession
             </span>
           </div>
 
@@ -1724,6 +2004,64 @@ export default function PlannerDashboard({ onTabChange }) {
                       </div>
                     </div>
 
+                    {/* SIH26027 Section 10: Department Modification Responses Indicator */}
+                    {((plan.department_responses && Object.keys(plan.department_responses).length > 0) || plan.modification_reason || plan.status === 'MODIFICATION_REQUESTED' || plan.status === 'ALL_DEPARTMENTS_ACCEPTED' || plan.status === 'MODIFICATION_REJECTED') && (
+                      <div className="mb-3 p-2 bg-slate-50 border border-slate-300 text-xs">
+                        <div className="flex items-center justify-between mb-1 pb-1 border-b border-slate-200">
+                          <span className="font-bold text-[10px] uppercase text-slate-700 flex items-center gap-1">
+                            <Layers className="w-3 h-3 text-[#0B2545]" />
+                            <span>Department Modification Review</span>
+                          </span>
+                          <span className={`px-1.5 py-0.5 font-bold text-[9px] uppercase border ${
+                            plan.modification_overall_status === 'ALL_DEPARTMENTS_ACCEPTED' || plan.status === 'ALL_DEPARTMENTS_ACCEPTED'
+                              ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                              : plan.modification_overall_status === 'MODIFICATION_REJECTED' || plan.status === 'MODIFICATION_REJECTED'
+                              ? 'bg-red-100 text-red-900 border-red-300'
+                              : 'bg-amber-100 text-amber-900 border-amber-300'
+                          }`}>
+                            {plan.modification_overall_status === 'ALL_DEPARTMENTS_ACCEPTED' || plan.status === 'ALL_DEPARTMENTS_ACCEPTED'
+                              ? 'ALL DEPARTMENTS ACCEPTED'
+                              : plan.modification_overall_status === 'MODIFICATION_REJECTED' || plan.status === 'MODIFICATION_REJECTED'
+                              ? 'MODIFICATION REJECTED'
+                              : 'WAITING FOR RESPONSES'}
+                          </span>
+                        </div>
+
+                        {plan.modification_reason && (
+                          <div className="text-[10px] text-slate-600 mb-1 italic truncate">
+                            Proposed: {plan.common_block_window} &bull; Reason: "{plan.modification_reason}"
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap gap-1 pt-1">
+                          {plan.department_responses && Object.entries(plan.department_responses).map(([deptCode, respStatus]) => {
+                            const isAcc = respStatus === 'ACCEPTED';
+                            const isRej = respStatus === 'REJECTED';
+                            return (
+                              <span
+                                key={deptCode}
+                                className={`px-2 py-0.5 text-[9px] font-bold font-mono border flex items-center gap-1 ${
+                                  isAcc
+                                    ? 'bg-emerald-50 text-emerald-900 border-emerald-400'
+                                    : isRej
+                                    ? 'bg-red-50 text-red-900 border-red-400'
+                                    : 'bg-amber-50 text-amber-900 border-amber-400'
+                                }`}
+                              >
+                                <span>{deptCode}:</span>
+                                <span>{isAcc ? 'ACCEPTED' : isRej ? 'REJECTED' : 'PENDING'}</span>
+                              </span>
+                            );
+                          })}
+                          {(!plan.department_responses || Object.keys(plan.department_responses).length === 0) && (plan.departments || ['Engineering']).map((d, dIdx) => (
+                            <span key={dIdx} className="px-2 py-0.5 text-[9px] font-bold font-mono border bg-amber-50 text-amber-900 border-amber-300">
+                              {d}: PENDING
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     <div className="flex items-center justify-between border-t border-slate-200 pt-2">
                       <button
                         onClick={(e) => {
@@ -1757,7 +2095,8 @@ export default function PlannerDashboard({ onTabChange }) {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleDecisionAction('APPROVE');
+                              setSelectedPlanForDecision(plan);
+                              handleApprovePlanDirect(plan);
                             }}
                             className="bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs uppercase px-3 py-1.5 flex items-center gap-1 cursor-pointer"
                           >
@@ -1768,7 +2107,8 @@ export default function PlannerDashboard({ onTabChange }) {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleDecisionAction('REJECT');
+                            setSelectedPlanForDecision(plan);
+                            handleOpenCoordinatedReject(plan);
                           }}
                           className="bg-red-700 hover:bg-red-800 text-white font-bold text-xs uppercase px-3 py-1.5 flex items-center gap-1 cursor-pointer"
                         >
@@ -1785,9 +2125,11 @@ export default function PlannerDashboard({ onTabChange }) {
         </div>
 
         {/* ── 7. PLANNER DECISION AREA ────────────────────────── */}
-        <div className="bg-white border border-slate-300 p-3 shadow-xs space-y-3">
-          <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
-            <ShieldCheck className="w-4 h-4 text-[#134074]" />
+        <div className="w-full bg-white border border-slate-300 p-4 shadow-xs space-y-3">
+          <div className="flex items-center gap-2.5 border-b border-slate-200 pb-2.5">
+            <div className="w-5 h-5 flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-4 h-4 text-[#134074]" />
+            </div>
             <h3 className="font-black text-xs text-[#0B2545] uppercase tracking-wider">
               PLANNER DECISION
             </h3>
@@ -2575,45 +2917,71 @@ export default function PlannerDashboard({ onTabChange }) {
   return (
     <div className="flex flex-1 h-full overflow-hidden">
       {/* ── LEFT NAVIGATION SIDEBAR ──────────────────────────── */}
-      <aside className="w-52 min-w-[208px] bg-[#0B2545] border-r border-slate-700 flex flex-col overflow-y-auto">
+      <aside className="w-56 min-w-[224px] max-w-[224px] bg-[#0B2545] border-r border-slate-700 flex flex-col overflow-y-auto shrink-0 select-none">
+        {/* ABPS Application Identity Block */}
+        <div className="p-3 border-b border-slate-700 bg-[#071626]">
+          <AppBrand variant="sidebar" logoHeight="56px" />
+        </div>
+
         {/* Planner Identity Header */}
-        <div className="p-2 border-b border-slate-700 bg-[#081b33]">
-          <div className="text-[10px] text-[#FFB703] font-black uppercase tracking-wider">CHIEF SECTION CONTROLLER</div>
-          <div className="text-[10px] text-slate-400 font-mono">{user?.full_name || 'Planner'}</div>
-          <div className="mt-1 flex items-center space-x-1 text-[9px]">
-            <span className="text-slate-500">PLAN:</span>
-            <span className="font-mono font-bold text-slate-300">{activePlan?.plan_code || 'NONE'}</span>
-            <span className={`px-1 py-0.5 text-[8px] font-bold ${activePlan?.approval_status === 'APPROVED' ? 'bg-emerald-700 text-white' : 'bg-amber-700 text-white'}`}>
-              {activePlan?.approval_status || 'N/A'}
+        <div className="p-3 border-b border-slate-700 bg-[#081b33] flex flex-col gap-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-[#FFB703] font-black uppercase tracking-wider">CHIEF SECTION CONTROLLER</span>
+            <span className={`px-1.5 py-0.5 text-[8px] font-mono font-bold uppercase tracking-wider ${activePlan?.approval_status === 'APPROVED' ? 'bg-emerald-700 text-white' : 'bg-amber-600/80 text-white'}`}>
+              {activePlan?.approval_status || 'ONLINE'}
             </span>
           </div>
-          <div className="mt-0.5 text-[9px] text-slate-500 font-mono">SYNC: {lastSyncTime}</div>
+          <div className="text-xs text-slate-200 font-mono font-medium truncate">
+            {user?.full_name || 'Railway Planner'}
+          </div>
+          <div className="flex items-center justify-between pt-1 border-t border-slate-800 text-[10px] font-mono text-slate-400">
+            <span>PLAN: <strong className="text-slate-200">{activePlan?.plan_code || 'NONE'}</strong></span>
+            <button
+              onClick={handlePlannerLogout}
+              className="h-5 px-2 bg-red-950/70 hover:bg-red-800 text-red-200 hover:text-white border border-red-700/60 text-[9px] font-mono font-bold uppercase tracking-wider flex items-center gap-1 cursor-pointer transition-colors"
+              title="Logout from Railway Control Workstation"
+            >
+              <LogOut className="w-2.5 h-2.5" />
+              <span>LOGOUT</span>
+            </button>
+          </div>
+          <div className="text-[9px] text-slate-400 font-mono flex items-center justify-between">
+            <span>SYNC: {lastSyncTime}</span>
+            <span className="text-[8px] text-slate-500">CRIS OP-NET</span>
+          </div>
         </div>
 
         {/* Navigation Items grouped */}
-        <nav className="flex-1 py-1">
+        <nav className="flex-1 py-2 divide-y divide-slate-800/60">
           {NAV_GROUPS.map(group => {
             const items = NAV_STATIONS.filter(s => s.group === group);
             return (
-              <div key={group}>
-                <div className="px-3 pt-2 pb-0.5 text-[9px] font-black text-slate-500 uppercase tracking-widest">{group}</div>
-                {items.map(station => {
-                  const Icon = station.icon;
-                  const isActive = activeStation === station.id;
-                  return (
-                    <button
-                      key={station.id}
-                      onClick={() => setActiveStation(station.id)}
-                      className={`w-full text-left px-3 py-1.5 flex items-center space-x-2 text-[11px] transition-colors cursor-pointer ${isActive
-                          ? 'bg-[#16253D] text-white font-bold border-l-2 border-blue-400'
-                          : 'text-slate-400 hover:bg-white/5 hover:text-slate-200 border-l-2 border-transparent'
-                        }`}
-                    >
-                      <Icon className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-blue-400' : 'text-slate-500'}`} />
-                      <span className="truncate">{station.label}</span>
-                    </button>
-                  );
-                })}
+              <div key={group} className="py-1.5">
+                <div className="px-3 pb-1 text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 bg-blue-500/60 inline-block"></span>
+                  <span>{group}</span>
+                </div>
+                <div className="space-y-0.5">
+                  {items.map(station => {
+                    const Icon = station.icon;
+                    const isActive = activeStation === station.id;
+                    return (
+                      <button
+                        key={station.id}
+                        onClick={() => setActiveStation(station.id)}
+                        className={`w-full text-left px-3 h-8 flex items-center text-[11px] transition-colors cursor-pointer border-l-2 ${isActive
+                            ? 'bg-[#16253D] text-white font-bold border-l-blue-400'
+                            : 'text-slate-400 hover:bg-white/5 hover:text-slate-200 border-l-transparent'
+                          }`}
+                      >
+                        <span className="w-5 h-5 flex items-center justify-center shrink-0 mr-2">
+                          <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-blue-400' : 'text-slate-400'}`} />
+                        </span>
+                        <span className="truncate flex-1">{station.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             );
           })}
@@ -2622,8 +2990,8 @@ export default function PlannerDashboard({ onTabChange }) {
 
       {/* ── MAIN CONTENT AREA ────────────────────────────────── */}
       <main className={`flex-1 ${activeStation === 'AUTOMATIC_BLOCK_PLANNING' ? 'overflow-hidden bg-[#080D1A] flex flex-col' : 'overflow-y-auto bg-[#F4F6F9]'}`}>
-        {/* Station Header Bar (Only shown for non-workstation stations) */}
-        {activeStation !== 'AUTOMATIC_BLOCK_PLANNING' && (
+        {/* Station Header Bar (Only shown for non-workstation and non-control-room stations) */}
+        {!['AUTOMATIC_BLOCK_PLANNING', 'CONTROL_PANEL'].includes(activeStation) && (
           <div className="border-b px-3 py-1.5 flex items-center justify-between sticky top-0 z-10 shadow-xs bg-white border-slate-300 text-[#0B2545]">
             <div className="flex items-center space-x-2">
               {currentNav && <currentNav.icon className="w-4 h-4 text-[#134074]" />}
@@ -2639,7 +3007,7 @@ export default function PlannerDashboard({ onTabChange }) {
         )}
 
         {/* Station Content */}
-        <div className={activeStation === 'AUTOMATIC_BLOCK_PLANNING' ? 'p-0 bg-[#080D1A] flex-1 flex flex-col h-full overflow-hidden' : 'p-3'}>
+        <div className={activeStation === 'AUTOMATIC_BLOCK_PLANNING' ? 'p-0 bg-[#080D1A] flex-1 flex flex-col h-full overflow-hidden' : 'p-4 flex-1 overflow-x-hidden'}>
           {loading && !apiError && activeStation !== 'AUTOMATIC_BLOCK_PLANNING' ? (
             <div className="flex items-center justify-center p-12">
               <RefreshCw className="w-6 h-6 text-[#134074] animate-spin" />
@@ -3002,53 +3370,101 @@ export default function PlannerDashboard({ onTabChange }) {
             <div className="bg-[#0B2545] text-white p-3 font-bold text-xs uppercase flex justify-between items-center">
               <span className="flex items-center gap-1.5">
                 <Edit2 className="w-4 h-4 text-[#FFB703]" />
-                MODIFY COORDINATED COMMON BLOCK &bull; {coordinatedPlanResult.plan_code}
+                MODIFY COORDINATED COMMON BLOCK &bull; {coordinatedPlanResult.plan_code || coordinatedPlanResult.plan_title || `PLAN BP-00${coordinatedPlanResult.id || '1'}`}
               </span>
               <button onClick={() => setShowCoordinatedModifyModal(false)} className="text-white/80 hover:text-white font-bold text-sm cursor-pointer">✕</button>
             </div>
             <form onSubmit={handleCoordinatedModifySubmit} className="p-4 space-y-3 text-xs">
               <div className="bg-blue-50 border border-blue-200 p-2 text-blue-900 text-[11px]">
-                <strong>Chief Controller Authority:</strong> Modify recommended common block timings for all {coordinatedPlanResult.requests_combined_count} grouped departmental jobs. Human modifications require mandatory operational justification.
+                <strong>Chief Controller Authority:</strong> Modify recommended common block timings for all {coordinatedPlanResult.requests_combined_count || (coordinatedPlanResult.request_ids || []).length || 1} grouped departmental jobs. Human modifications require mandatory operational justification.
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="font-bold text-slate-700 block mb-1">Start Time (Minute of Day):</label>
+                  <label className="font-bold text-slate-700 block mb-1">Start Time (HH:MM):</label>
                   <input
-                    type="number"
-                    value={coordinatedModifyStart}
-                    onChange={(e) => setCoordinatedModifyStart(e.target.value)}
-                    className="w-full border border-slate-300 p-2 font-mono font-bold"
+                    type="time"
+                    value={mToTime(parseInt(coordinatedModifyStart) || 0)}
+                    onChange={(e) => {
+                      const mins = timeToM(e.target.value);
+                      if (mins !== null) setCoordinatedModifyStart(mins);
+                    }}
+                    className="w-full border border-slate-300 p-2 font-mono font-bold bg-white"
                     required
                   />
-                  <span className="text-[10px] text-slate-500 font-mono">HH:MM = {mToTime(parseInt(coordinatedModifyStart) || 0)}</span>
+                  <span className="text-[10px] text-slate-500 font-mono">Minute of Day: {coordinatedModifyStart}</span>
                 </div>
                 <div>
-                  <label className="font-bold text-slate-700 block mb-1">End Time (Minute of Day):</label>
+                  <label className="font-bold text-slate-700 block mb-1">End Time (HH:MM):</label>
                   <input
-                    type="number"
-                    value={coordinatedModifyEnd}
-                    onChange={(e) => setCoordinatedModifyEnd(e.target.value)}
-                    className="w-full border border-slate-300 p-2 font-mono font-bold"
+                    type="time"
+                    value={mToTime(parseInt(coordinatedModifyEnd) || 0)}
+                    onChange={(e) => {
+                      const mins = timeToM(e.target.value);
+                      if (mins !== null) setCoordinatedModifyEnd(mins);
+                    }}
+                    className="w-full border border-slate-300 p-2 font-mono font-bold bg-white"
                     required
                   />
-                  <span className="text-[10px] text-slate-500 font-mono">HH:MM = {mToTime(parseInt(coordinatedModifyEnd) || 0)}</span>
+                  <span className="text-[10px] text-slate-500 font-mono">Minute of Day: {coordinatedModifyEnd}</span>
                 </div>
               </div>
+              <div className="bg-slate-50 p-2 border border-slate-200 font-mono text-[11px] flex justify-between">
+                <span>Proposed Duration: <strong>{Math.max(0, (parseInt(coordinatedModifyEnd) || 0) - (parseInt(coordinatedModifyStart) || 0))} min</strong></span>
+                <span>Window: <strong>{mToTime(parseInt(coordinatedModifyStart) || 0)} – {mToTime(parseInt(coordinatedModifyEnd) || 0)}</strong></span>
+              </div>
+
+              {/* SIH26027 Section 12: Validate Before Sending */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={handleValidateAlternative}
+                    disabled={coordinatedModifyValidating}
+                    className="cris-btn bg-[#0B2545] hover:bg-[#134074] text-white font-bold text-xs uppercase px-3 py-1.5 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-[#FFB703]" />
+                    <span>{coordinatedModifyValidating ? 'Checking Occupancies...' : 'Validate Alternative Timing'}</span>
+                  </button>
+                  {coordinatedModifyValidationResult && (
+                    <span className={`text-[10px] font-bold px-2 py-1 border ${
+                      coordinatedModifyValidationResult.is_feasible
+                        ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
+                        : 'bg-red-50 text-red-900 border-red-300'
+                    }`}>
+                      {coordinatedModifyValidationResult.is_feasible ? '✓ ALTERNATIVE TIME VALIDATED' : '✕ ALTERNATIVE TIME NOT FEASIBLE'}
+                    </span>
+                  )}
+                </div>
+
+                {coordinatedModifyValidationResult && !coordinatedModifyValidationResult.is_feasible && (
+                  <div className="bg-red-50 border border-red-200 p-2 text-red-900 text-[11px]">
+                    <strong>Operational Conflict:</strong> {coordinatedModifyValidationResult.message}
+                  </div>
+                )}
+
+                {coordinatedModifyValidationResult && coordinatedModifyValidationResult.is_feasible && (
+                  <div className="bg-emerald-50 border border-emerald-200 p-2 text-emerald-900 text-[11px]">
+                    <strong>Conflict-Free Slot:</strong> {coordinatedModifyValidationResult.message}
+                  </div>
+                )}
+              </div>
+
               <div>
                 <label className="font-bold text-slate-700 block mb-1">Mandatory Operational Justification:</label>
                 <textarea
                   value={coordinatedModifyReason}
                   onChange={(e) => setCoordinatedModifyReason(e.target.value)}
-                  className="w-full border border-slate-300 p-2 text-slate-800"
+                  className="w-full border border-slate-300 p-2 text-slate-800 focus:border-[#0B2545] outline-none"
                   rows="3"
-                  placeholder="Reason for adjusting multi-department common possession window..."
+                  placeholder="Reason for adjusting multi-department common possession window (e.g., train precedence, machine repositioning, OHE crew availability)..."
                   required
                 />
               </div>
               <div className="pt-2 flex items-center justify-between border-t border-slate-200">
                 <button type="button" onClick={() => setShowCoordinatedModifyModal(false)} className="cris-btn cris-btn-secondary text-xs">Cancel</button>
-                <button type="submit" className="cris-btn cris-btn-primary text-xs flex items-center gap-1">
-                  Save & Record Common Block Modification
+                <button type="submit" className="cris-btn bg-amber-600 hover:bg-amber-700 text-white font-black text-xs uppercase px-4 py-2 flex items-center gap-1.5 cursor-pointer shadow-xs">
+                  <Edit2 className="w-3.5 h-3.5" />
+                  Propose &amp; Send Alternative to Department(s)
                 </button>
               </div>
             </form>
@@ -3063,13 +3479,13 @@ export default function PlannerDashboard({ onTabChange }) {
             <div className="bg-red-800 text-white p-3 font-bold text-xs uppercase flex justify-between items-center">
               <span className="flex items-center gap-1.5">
                 <XCircle className="w-4 h-4 text-white" />
-                REJECT COMMON BLOCK PLAN &bull; {coordinatedPlanResult.plan_code}
+                REJECT COMMON BLOCK PLAN &bull; {coordinatedPlanResult.plan_code || coordinatedPlanResult.plan_title || `PLAN BP-00${coordinatedPlanResult.id || '1'}`}
               </span>
               <button onClick={() => setShowCoordinatedRejectModal(false)} className="text-white/80 hover:text-white font-bold text-sm cursor-pointer">✕</button>
             </div>
             <form onSubmit={handleCoordinatedRejectSubmit} className="p-4 space-y-3 text-xs">
               <div className="bg-red-50 border border-red-200 p-2 text-red-900 text-[11px]">
-                <strong>Operational Block Rejection:</strong> Rejecting this common plan will NOT delete the maintenance requests. All {coordinatedPlanResult.requests_combined_count} requests will be unlinked and restored to the pending queue for individual scheduling.
+                <strong>Operational Block Rejection:</strong> Rejecting this common plan will NOT delete the maintenance requests. All {coordinatedPlanResult.requests_combined_count || (coordinatedPlanResult.request_ids || []).length || 1} requests will be unlinked and restored to the pending queue for individual scheduling.
               </div>
               <div>
                 <label className="font-bold text-slate-700 block mb-1">Mandatory Rejection Justification:</label>
@@ -3100,7 +3516,7 @@ export default function PlannerDashboard({ onTabChange }) {
             <div className="bg-[#0B2545] text-white p-3 font-bold text-xs uppercase flex justify-between items-center">
               <span className="flex items-center gap-1.5">
                 <Sliders className="w-4 h-4 text-[#FFB703]" />
-                COORDINATED COMMON BLOCK WHAT-IF SIMULATION &bull; {coordinatedPlanResult.plan_code}
+                COORDINATED COMMON BLOCK WHAT-IF SIMULATION &bull; {coordinatedPlanResult.plan_code || coordinatedPlanResult.plan_title || `PLAN BP-00${coordinatedPlanResult.id || '1'}`}
               </span>
               <button onClick={() => setShowCoordinatedWhatIfModal(false)} className="text-white/80 hover:text-white font-bold text-sm cursor-pointer">✕</button>
             </div>

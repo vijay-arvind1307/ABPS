@@ -22,7 +22,8 @@ from app.routers import (
     coordinated_block_plans_router,
     live_router,
     availability_router,
-    standard_api_router
+    standard_api_router,
+    ml_router
 )
 from app.models.models import User, RailwayStation, Train
 
@@ -77,9 +78,20 @@ app.include_router(availability_router, prefix=settings.API_V1_STR)
 app.include_router(availability_router)  # Allow direct /availability paths
 app.include_router(standard_api_router, prefix=settings.API_V1_STR)
 app.include_router(standard_api_router)  # Allow direct standard REST paths (/requests, /plans/..., etc.)
+app.include_router(ml_router, prefix="/api/ml", tags=["ML Maintenance Risk Engine"])
+app.include_router(ml_router, prefix="/ml", tags=["ML Maintenance Risk Engine"])
 
 
-from app.routers.block_requests import optimize_request_pool, PoolOptimizeRequest
+from app.routers.block_requests import (
+    optimize_request_pool, PoolOptimizeRequest,
+    get_department_modifications, get_plan_modifications,
+    modify_coordinated_block_plan, accept_modification_proposal,
+    reject_modification_proposal, validate_alternative_time_endpoint
+)
+from app.schemas.schemas import (
+    CoordinatedPlanDecisionRequest, DepartmentProposalActionRequest,
+    AlternativeValidationRequest
+)
 from app.routers.auth import get_current_user
 from app.db.session import get_db
 from fastapi import Depends
@@ -94,6 +106,73 @@ def api_block_planning_optimize(
 ):
     """Global multi-department block pool optimization endpoint alias."""
     return optimize_request_pool(req=req, db=db, current_user=current_user)
+
+
+# ====================================================================
+# SIH26027: EXACT MASTER PROMPT SECTION 14 ENDPOINTS
+# ====================================================================
+@app.get("/api/department/modifications", tags=["Block Modification Workflow"])
+def api_get_department_modifications(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Department retrieves pending modification proposals."""
+    return get_department_modifications(db=db, current_user=current_user)
+
+
+@app.get("/api/block-plans/{plan_id}/modifications", tags=["Block Modification Workflow"])
+def api_get_block_plan_modifications(
+    plan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Planner retrieves department responses breakdown."""
+    return get_plan_modifications(id=plan_id, db=db, current_user=current_user)
+
+
+@app.post("/api/block-plans/{plan_id}/modification", tags=["Block Modification Workflow"])
+def api_post_block_plan_modification(
+    plan_id: int,
+    req: CoordinatedPlanDecisionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Planner proposes an alternative time window."""
+    return modify_coordinated_block_plan(id=plan_id, req=req, db=db, current_user=current_user)
+
+
+@app.post("/api/block-plans/{plan_id}/validate-alternative", tags=["Block Modification Workflow"])
+def api_validate_block_plan_alternative(
+    plan_id: int,
+    req: AlternativeValidationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Validates proposed alternative time prior to sending."""
+    return validate_alternative_time_endpoint(req=req, id=plan_id, db=db, current_user=current_user)
+
+
+@app.post("/api/modifications/{id}/accept", tags=["Block Modification Workflow"])
+def api_accept_modification(
+    id: int,
+    req: Optional[DepartmentProposalActionRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Department accepts planner's alternative proposal with live re-validation."""
+    return accept_modification_proposal(id=id, req=req, db=db, current_user=current_user)
+
+
+@app.post("/api/modifications/{id}/reject", tags=["Block Modification Workflow"])
+def api_reject_modification(
+    id: int,
+    req: Optional[DepartmentProposalActionRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Department rejects planner's alternative proposal."""
+    return reject_modification_proposal(id=id, req=req, db=db, current_user=current_user)
+
 
 
 

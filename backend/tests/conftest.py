@@ -20,14 +20,23 @@ def setup_test_db():
 
     db = SessionLocal()
     try:
-        from app.models.models import PlanVersion, WhatIfScenario, TrainSectionOccupancy, TrainPositionSnapshot, TrainTrip, ExecutionRecord
+        from app.models.models import (
+            PlanVersion, WhatIfScenario, TrainSectionOccupancy, TrainPositionSnapshot,
+            TrainTrip, ExecutionRecord, MLPrediction, PlanModificationProposal,
+            MaintenanceDependency, CoordinatedBlockPlan
+        )
         db.query(ExecutionRecord).delete()
         db.query(PlanJob).delete()
         db.query(PlanVersion).delete()
         db.query(WhatIfScenario).delete()
+        db.query(PlanModificationProposal).delete()
+        db.query(MLPrediction).delete()
+        db.query(MaintenanceJobResource).delete()
+        db.query(MaintenanceDependency).delete()
+        db.query(MaintenanceJob).update({"coordinated_plan_id": None})
+        db.query(CoordinatedBlockPlan).delete()
         db.query(BlockPlan).update({"superseded_by_plan_id": None})
         db.query(BlockPlan).delete()
-        db.query(MaintenanceJobResource).delete()
         db.query(MaintenanceJob).delete()
         db.query(TrainSectionOccupancy).filter(TrainSectionOccupancy.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db.query(TrainPositionSnapshot).filter(TrainPositionSnapshot.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
@@ -154,14 +163,23 @@ def setup_test_db():
     yield
     db_clean = SessionLocal()
     try:
-        from app.models.models import PlanVersion, WhatIfScenario, TrainSectionOccupancy, TrainPositionSnapshot, TrainTrip, ExecutionRecord
+        from app.models.models import (
+            PlanVersion, WhatIfScenario, TrainSectionOccupancy, TrainPositionSnapshot,
+            TrainTrip, ExecutionRecord, MLPrediction, PlanModificationProposal,
+            MaintenanceDependency, CoordinatedBlockPlan
+        )
         db_clean.query(ExecutionRecord).delete()
         db_clean.query(PlanJob).delete()
         db_clean.query(PlanVersion).delete()
         db_clean.query(WhatIfScenario).delete()
+        db_clean.query(PlanModificationProposal).delete()
+        db_clean.query(MLPrediction).delete()
+        db_clean.query(MaintenanceJobResource).delete()
+        db_clean.query(MaintenanceDependency).delete()
+        db_clean.query(MaintenanceJob).update({"coordinated_plan_id": None})
+        db_clean.query(CoordinatedBlockPlan).delete()
         db_clean.query(BlockPlan).update({"superseded_by_plan_id": None})
         db_clean.query(BlockPlan).delete()
-        db_clean.query(MaintenanceJobResource).delete()
         db_clean.query(MaintenanceJob).delete()
         db_clean.query(TrainSectionOccupancy).filter(TrainSectionOccupancy.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db_clean.query(TrainPositionSnapshot).filter(TrainPositionSnapshot.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
@@ -171,13 +189,19 @@ def setup_test_db():
         db_clean.query(Train).filter(Train.train_number.in_(["12919", "22436"])).delete(synchronize_session=False)
         db_clean.commit()
 
-        # Ensure authoritative timetable trains are present
         if db_clean.query(Train).count() == 0:
             try:
                 from app.scripts.import_railway_documents import RailwayDocumentImporter
                 RailwayDocumentImporter(db_clean).import_all()
             except Exception as ex:
                 print(f"[CONFTEST TEARDOWN] Importer notice: {ex}")
+        
+        # Ensure canonical jobs REQ-101 to REQ-106 are seeded for runtime workstation
+        if db_clean.query(MaintenanceJob).count() == 0:
+            try:
+                seed_database(db_clean)
+            except Exception as ex:
+                print(f"[CONFTEST TEARDOWN] Seeding notice: {ex}")
     finally:
         db_clean.close()
     settings.TRAIN_DATA_MODE = "live"

@@ -394,6 +394,11 @@ class MaintenanceJobResponse(MaintenanceJobBase):
     priority_score: float = 50.0
     safety_tier: str = "Tier 4"
     priority_explanation: Optional[Dict[str, Any]] = None
+    ml_risk_score: Optional[float] = None
+    ml_risk_class: Optional[str] = None
+    ai_assisted_priority_score: Optional[float] = None
+    ml_model_version: Optional[str] = None
+    ml_explanation: Optional[Any] = None
     planner_override_score: Optional[float] = None
     planner_override_reason: Optional[str] = None
     planner_override_at: Optional[datetime] = None
@@ -877,5 +882,85 @@ class CoordinatedBlockPlanResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ====================================================================
+# SIH26027: PLAN MODIFICATION PROPOSAL WORKFLOW SCHEMAS
+# ====================================================================
+class AlternativeValidationRequest(BaseModel):
+    start_min: Optional[int] = None
+    end_min: Optional[int] = None
+    recommended_start_min: Optional[int] = None
+    recommended_end_min: Optional[int] = None
+    duration_min: Optional[int] = None
+    section_id: Optional[int] = None
+    section_ids: Optional[List[int]] = None
+    corridor_id: Optional[int] = None
+    plan_date: Optional[str] = None
+
+
+class AlternativeValidationResponse(BaseModel):
+    is_feasible: bool
+    status: str  # FEASIBLE, INFEASIBLE, DATA_UNAVAILABLE
+    message: str
+    conflicts_count: int = 0
+    conflicts: List[Dict[str, Any]] = []
+    recommended_alternatives: List[Dict[str, Any]] = []
+
+
+class PlanModificationCreateRequest(BaseModel):
+    proposed_start_min: int
+    proposed_end_min: int
+    reason: str
+    version: Optional[int] = None
+
+
+class DepartmentProposalActionRequest(BaseModel):
+    remarks: Optional[str] = None
+
+
+class PlanModificationProposalResponse(BaseModel):
+    id: int
+    request_id: int
+    request_code: Optional[str] = None
+    block_plan_id: Optional[int] = None
+    block_plan_code: Optional[str] = None
+    department_id: int
+    department_code: Optional[str] = None
+    department_name: Optional[str] = None
+    section_name: Optional[str] = None
+    work_type: Optional[str] = None
+    work_title: Optional[str] = None
+    proposed_by_id: Optional[int] = None
+    proposed_by_name: Optional[str] = None
+    original_start_min: int
+    original_end_min: int
+    original_time_window: Optional[str] = None
+    proposed_start_min: int
+    proposed_end_min: int
+    proposed_time_window: Optional[str] = None
+    proposed_duration_min: int
+    reason: str
+    status: str
+    responded_by_id: Optional[int] = None
+    responded_by_name: Optional[str] = None
+    responded_at: Optional[datetime] = None
+    department_remarks: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BlockPlanModificationsSummaryResponse(BaseModel):
+    block_plan_id: int
+    block_plan_code: str
+    proposed_time_window: Optional[str] = None
+    proposed_start_min: Optional[int] = None
+    proposed_end_min: Optional[int] = None
+    overall_status: str
+    proposals: List[PlanModificationProposalResponse] = []
+
 
 

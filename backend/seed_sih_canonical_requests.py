@@ -189,7 +189,28 @@ def seed_sih_requests():
                 existing.coordination_status = "NOT_CHECKED"
 
         db.commit()
-        print("Successfully seeded REQ-101 through REQ-106!")
+
+        # Pre-compute XGBoost ML risk score and TreeSHAP factors for canonical jobs
+        try:
+            from app.algorithms.priority import PriorityEngine
+            all_jobs = db.query(MaintenanceJob).filter(MaintenanceJob.job_code.in_(["REQ-101", "REQ-102", "REQ-103", "REQ-104", "REQ-105", "REQ-106"])).all()
+            for j in all_jobs:
+                p_res = PriorityEngine.calculate_full_priority(
+                    work_type=j.work_type,
+                    department_code="ENGG",
+                    job_obj=j,
+                    db_session=db
+                )
+                j.ml_risk_score = p_res.get("ml_risk_score")
+                j.ml_risk_class = p_res.get("ml_risk_class")
+                j.ai_assisted_priority_score = p_res.get("ai_assisted_priority_score")
+                j.ml_model_version = p_res.get("ml_model_version")
+                j.ml_explanation = p_res.get("ml_top_contributing_factors")
+            db.commit()
+        except Exception as e:
+            print("[WARN] ML pre-computation notice in seed:", e)
+
+        print("Successfully seeded REQ-101 through REQ-106 with ML Risk scores!")
     finally:
         db.close()
 

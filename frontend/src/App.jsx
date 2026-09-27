@@ -29,8 +29,28 @@ export default function App() {
       } else {
         setActiveTab('planner-dashboard');
       }
+    } else {
+      document.title = 'ABPS — Automatic Block Planning System';
     }
   }, [currentUser]);
+
+  useEffect(() => {
+    const titles = {
+      'dept-dashboard': 'ABPS — Department Maintenance Portal',
+      'planner-dashboard': 'ABPS — Control Room',
+      'train-position': 'ABPS — Live Train Position',
+      'available-windows': 'ABPS — Available Windows',
+      'dynamic-replan': 'ABPS — Dynamic Re-Planning',
+      'what-if': 'ABPS — What-If Analysis',
+      'reports': 'ABPS — Reports & Audit Trail',
+      'admin-master': 'ABPS — Administration & Master Data',
+    };
+    if (currentUser) {
+      document.title = titles[activeTab] || 'ABPS — Automatic Block Planning System';
+    } else {
+      document.title = 'ABPS — Automatic Block Planning System';
+    }
+  }, [activeTab, currentUser]);
 
   const handleLoginSuccess = (user) => {
     setCurrentUser(user);
@@ -84,12 +104,12 @@ export default function App() {
         </ErrorBoundary>
       </main>
       {activeTab !== 'planner-dashboard' && (
-        <footer className="bg-[#0B2545] text-slate-400 text-[11px] py-2 px-4 border-t border-slate-700 flex flex-wrap justify-between items-center">
+        <footer className="bg-[#0B2545] text-slate-400 text-[11px] py-2 px-4 border-t border-slate-700 flex flex-wrap justify-between items-center select-none">
           <div className="font-semibold text-slate-300">
-            INDIAN RAILWAYS — RAILWAY MAINTENANCE BLOCK PLANNING SYSTEM (IR-ABPS)
+            ABPS &mdash; Automatic Block Planning System
           </div>
           <div className="font-mono text-slate-400">
-            Decision Support & Constraint Optimization Engine | Not for direct operational control
+            Railway Maintenance Planning &amp; Decision Support
           </div>
         </footer>
       )}

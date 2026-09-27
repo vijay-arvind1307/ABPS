@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Shield, Key, User, ArrowRight, CheckCircle2, Train } from 'lucide-react';
+import AppBrand from '../components/AppBrand';
 import { loginUser } from '../services/auth';
 
 export default function Login({ onLoginSuccess }) {
@@ -32,15 +33,12 @@ export default function Login({ onLoginSuccess }) {
       <div className="bg-white border-2 border-[#0B2545] shadow-2xl w-full max-w-md">
         {/* Header */}
         <div className="bg-[#0B2545] text-white p-5 text-center border-b-4 border-[#FFB703]">
-          <div className="w-12 h-12 bg-[#FFB703] text-[#0B2545] font-black text-xl flex items-center justify-center mx-auto mb-2 border border-white">
-            IR
+          <AppBrand variant="login" logoHeight="80px" className="mb-2" />
+          <div className="mt-2.5 text-xs text-slate-300 leading-tight">
+            <div>Railway Maintenance Block Planning</div>
+            <div>and Operations Decision Support</div>
           </div>
-          <h2 className="text-sm font-bold tracking-wide uppercase">INDIAN RAILWAYS</h2>
-          <h3 className="text-base font-extrabold tracking-wide uppercase mt-0.5">
-            RAILWAY MAINTENANCE BLOCK PLANNING SYSTEM
-          </h3>
-          <p className="text-xs text-slate-300 mt-0.5">AI-Assisted Maintenance Block Planning & Optimization</p>
-          <div className="mt-2 text-[10px] text-amber-300 font-mono uppercase tracking-wider">
+          <div className="mt-2.5 text-[10px] text-amber-300 font-mono uppercase tracking-wider">
             OPERATIONAL CONTROL & PLANNING PORTAL
           </div>
         </div>

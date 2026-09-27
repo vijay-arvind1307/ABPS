@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, CheckCircle, AlertCircle, Shield, Award, Layers, Zap } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, Shield, Award, Layers, Zap, Sparkles } from 'lucide-react';
 
 export default function ExplainabilityDrawer({ explanation, isOpen, onClose }) {
   if (!isOpen || !explanation) return null;
@@ -100,6 +100,62 @@ export default function ExplainabilityDrawer({ explanation, isOpen, onClose }) {
             ))}
           </div>
         </div>
+
+        {/* AI Predicted Maintenance Risk (SIH26027 Advisory Layer) */}
+        {(explanation.ml_risk_score !== undefined && explanation.ml_risk_score !== null) && (
+          <div className="border-2 border-purple-300 bg-purple-50/70 p-3 space-y-2">
+            <div className="flex items-center justify-between border-b border-purple-200 pb-1.5">
+              <div className="flex items-center gap-1.5 font-bold text-purple-950 uppercase text-[11px]">
+                <Sparkles className="w-3.5 h-3.5 text-purple-700" />
+                AI PREDICTED MAINTENANCE RISK (XGBOOST)
+              </div>
+              <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 border ${
+                explanation.ml_risk_class === 'CRITICAL' ? 'bg-red-100 text-red-800 border-red-300' :
+                explanation.ml_risk_class === 'HIGH' ? 'bg-amber-100 text-amber-800 border-amber-300' :
+                explanation.ml_risk_class === 'MEDIUM' ? 'bg-blue-100 text-blue-800 border-blue-300' :
+                'bg-slate-100 text-slate-700 border-slate-300'
+              }`}>
+                {explanation.ml_risk_class || 'MEDIUM'} ({explanation.ml_risk_score?.toFixed(1)}/100)
+              </span>
+            </div>
+
+            {/* Formula Breakdown */}
+            <div className="p-2 bg-white border border-purple-200 text-[11px]">
+              <div className="text-[10px] font-bold text-slate-500 uppercase">PRIORITY FORMULA BREAKDOWN</div>
+              <div className="font-mono text-purple-900 font-bold text-[11px] mt-0.5">
+                {explanation.ml_formula_breakdown || (
+                  `${(explanation.deterministic_priority || explanation.score || 75.0).toFixed(1)} * 85% (Deterministic) + ${explanation.ml_risk_score?.toFixed(1)} * 15% (AI Risk) = ${(explanation.ai_assisted_priority || explanation.priority_score || explanation.score).toFixed(1)}`
+                )}
+              </div>
+              <div className="text-[9px] text-slate-600 mt-1 flex justify-between">
+                <span>Deterministic: <strong>{(explanation.deterministic_priority || 75.0).toFixed(1)}</strong></span>
+                <span>AI Risk: <strong>{explanation.ml_risk_score?.toFixed(1)}</strong></span>
+                <span>Weight: <strong>15% ML</strong></span>
+              </div>
+            </div>
+
+            {/* Top Contributing Factors */}
+            {explanation.ml_top_contributing_factors && explanation.ml_top_contributing_factors.length > 0 && (
+              <div>
+                <div className="text-[10px] font-bold text-slate-700 uppercase mb-1">TOP CONTRIBUTING FACTORS:</div>
+                <ul className="space-y-1">
+                  {explanation.ml_top_contributing_factors.map((f, i) => (
+                    <li key={i} className="text-[11px] flex items-center justify-between bg-white px-2 py-1 border border-purple-100">
+                      <span className="text-slate-800 font-medium">{f.label || f.feature}: <strong className="text-slate-900">{f.value}</strong></span>
+                      <span className={`font-mono text-[10px] font-bold px-1 ${f.direction === 'INCREASES_RISK' ? 'text-red-700 bg-red-50' : 'text-emerald-700 bg-emerald-50'}`}>
+                        {f.impact_label}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="text-[9px] text-purple-900/70 italic border-t border-purple-200 pt-1">
+              Model: {explanation.ml_model_version || 'MRISK-XGB-1.0'} &bull; Advisory Decision Support. Not an official Indian Railways safety score.
+            </div>
+          </div>
+        )}
 
         {/* Multi-Department Compatibility Synergy */}
         {compatibility_synergies.length > 0 && (

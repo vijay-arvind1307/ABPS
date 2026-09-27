@@ -72,8 +72,12 @@ class CPSATSolver:
                 w_secs = set(w.get("section_ids") or ([w_sec] if w_sec else []))
                 w_dur = w.get("usable_duration_min", 0)
 
-                # Geographic match: job sections must intersect window sections
-                sec_match = bool(aff_secs & w_secs) if aff_secs else (j_sec == w_sec if j_sec and w_sec else False)
+                # Geographic match: all affected sections of the job must be covered by the window
+                if aff_secs:
+                    sec_match = aff_secs.issubset(w_secs) if len(aff_secs) > 1 else bool(aff_secs & w_secs)
+                else:
+                    sec_match = (j_sec in w_secs) if (j_sec and w_secs) else False
+
                 if sec_match and w_dur >= j["estimated_duration_min"]:
                     cands.append(w["id"])
             candidate_windows_for_job[j["id"]] = cands
@@ -140,17 +144,18 @@ class CPSATSolver:
         # ----------------------------------------------------
         # HARD CONSTRAINT 1: Work-Type Compatibility on Track Section
         # ----------------------------------------------------
-        for w in windows:
-            w_id = w["id"]
-            w_jobs = [j for j in jobs if (j["id"], w_id) in job_window_intervals]
+        for i in range(len(jobs)):
+            for k in range(i + 1, len(jobs)):
+                j1 = jobs[i]
+                j2 = jobs[k]
+                j1_id = j1["id"]
+                j2_id = j2["id"]
 
-            for i in range(len(w_jobs)):
-                for k in range(i + 1, len(w_jobs)):
-                    j1 = w_jobs[i]
-                    j2 = w_jobs[k]
-                    j1_id = j1["id"]
-                    j2_id = j2["id"]
+                secs1 = set(j1.get("affected_section_ids") or ([j1.get("section_id")] if j1.get("section_id") else []))
+                secs2 = set(j2.get("affected_section_ids") or ([j2.get("section_id")] if j2.get("section_id") else []))
 
+                # If jobs share any physical section, verify compatibility
+                if secs1 & secs2:
                     dept1 = str(j1.get("department_code") or j1.get("department") or "").upper()
                     dept2 = str(j2.get("department_code") or j2.get("department") or "").upper()
                     wt1 = str(j1.get("work_type") or "").upper()
@@ -174,13 +179,15 @@ class CPSATSolver:
                     )
 
                     if not is_compatible:
-                        # Incompatible jobs must NOT overlap: either j1 before j2 OR j2 before j1
-                        b = model.NewBoolVar(f"order_{j1_id}_{j2_id}_{w_id}")
-                        _, s1, e1 = job_window_intervals[(j1_id, w_id)]
-                        _, s2, e2 = job_window_intervals[(j2_id, w_id)]
+                        # Incompatible jobs sharing a physical section must NOT overlap in time
+                        b = model.NewBoolVar(f"order_{j1_id}_{j2_id}")
+                        s1 = start_time[j1_id]
+                        e1 = end_time[j1_id]
+                        s2 = start_time[j2_id]
+                        e2 = end_time[j2_id]
 
-                        model.Add(e1 <= s2).OnlyEnforceIf([x[(j1_id, w_id)], x[(j2_id, w_id)], b])
-                        model.Add(e2 <= s1).OnlyEnforceIf([x[(j1_id, w_id)], x[(j2_id, w_id)], b.Not()])
+                        model.Add(e1 <= s2).OnlyEnforceIf([is_scheduled[j1_id], is_scheduled[j2_id], b])
+                        model.Add(e2 <= s1).OnlyEnforceIf([is_scheduled[j1_id], is_scheduled[j2_id], b.Not()])
 
         # ----------------------------------------------------
         # HARD CONSTRAINT 2: Dependencies (Finish-to-Start)

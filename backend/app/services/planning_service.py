@@ -19,33 +19,9 @@ class PlanningService:
     @staticmethod
     def get_windows(db: Session, corridor_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Strictly READ-ONLY query of feasible maintenance windows.
+        Strictly READ-ONLY query of feasible maintenance windows based on actual occupancy data.
         NEVER mutates or deletes database rows on GET requests.
         """
-        q = db.query(BlockWindow)
-        if corridor_id:
-            q = q.filter(BlockWindow.corridor_id == corridor_id)
-        existing = q.all()
-        if existing:
-            return [
-                {
-                    "id": w.id,
-                    "window_code": w.window_code,
-                    "section_id": w.section_id,
-                    "corridor_id": w.corridor_id,
-                    "start_min": w.start_min,
-                    "end_min": w.end_min,
-                    "usable_duration_min": w.usable_duration_min,
-                    "train_before_no": w.train_before_no,
-                    "train_after_no": w.train_after_no,
-                    "constraints_applied_json": w.constraints_applied_json,
-                    "feasibility": w.feasibility,
-                    "source": w.source
-                }
-                for w in existing
-            ]
-
-        # If not yet persisted, compute dynamically in-memory without mutating the DB
         occupancies = TrainService.calculate_all_occupancies(db) or []
         sections = db.query(RailwaySection).all()
         if corridor_id:
@@ -67,6 +43,26 @@ class PlanningService:
                 sw["id"] = global_win_id
                 global_win_id += 1
                 all_windows.append(sw)
+        # Multi-section intersection windows for corridors
+        corridor_sections = {}
+        for sec in sections:
+            corridor_sections.setdefault(sec.corridor_id, []).append(sec)
+
+        for c_id, sec_list in corridor_sections.items():
+            if len(sec_list) > 1:
+                sec_ids = [s.id for s in sec_list]
+                sec_map = {
+                    s.id: [w for w in all_windows if w.get("section_id") == s.id]
+                    for s in sec_list
+                }
+                multi_wins = WindowEngine.intersect_windows_for_sections(sec_map, min_duration_min=30)
+                for mw in multi_wins:
+                    mw["id"] = global_win_id
+                    global_win_id += 1
+                    mw["corridor_id"] = c_id
+                    mw["section_id"] = sec_ids[0]
+                    mw["section_ids"] = sec_ids
+                    all_windows.append(mw)
 
         return all_windows
 

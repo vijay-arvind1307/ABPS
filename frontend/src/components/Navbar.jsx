@@ -29,8 +29,8 @@ export default function Navbar({ activeTab, onTabChange }) {
     { id: 'dept-dashboard', label: 'Department Demands & Blocks', icon: LayoutDashboard, roles: DEPT_ROLES },
 
     // Railway Planner primary screens
-    { id: 'planner-dashboard', label: 'Control Room / Planner Dashboard', icon: CalendarDays, roles: PLANNER_ROLES },
-    { id: 'train-position', label: 'Live Train Position (TN Corridors)', icon: Radio, roles: ALL_ROLES },
+    { id: 'planner-dashboard', label: 'Control Room', icon: CalendarDays, roles: PLANNER_ROLES },
+    { id: 'train-position', label: 'Live Train Position', icon: Radio, roles: ALL_ROLES },
     { id: 'available-windows', label: 'Available Windows', icon: Clock, roles: PLANNER_ROLES },
     { id: 'dynamic-replan', label: 'Dynamic Re-Planning', icon: Shuffle, roles: PLANNER_ROLES },
     { id: 'what-if', label: 'What-If Analysis', icon: Cpu, roles: PLANNER_ROLES },
@@ -41,7 +41,7 @@ export default function Navbar({ activeTab, onTabChange }) {
   const visibleTabs = navItems.filter((item) => item.roles.includes(role));
 
   return (
-    <nav className="bg-[#134074] border-b border-slate-400 px-3 py-0 flex items-center space-x-1 overflow-x-auto shadow-inner text-[12px]">
+    <nav className="h-10 min-h-[40px] bg-[#134074] border-b border-slate-700 px-4 flex items-stretch space-x-1 overflow-x-auto shadow-inner text-[12px] select-none shrink-0">
       {visibleTabs.map((tab) => {
         const Icon = tab.icon;
         const isActive = activeTab === tab.id;
@@ -49,13 +49,15 @@ export default function Navbar({ activeTab, onTabChange }) {
           <button
             key={tab.id}
             onClick={() => onTabChange(tab.id)}
-            className={`px-3 py-2 font-semibold flex items-center space-x-1.5 whitespace-nowrap transition-colors border-t-2 ${isActive
-                ? 'bg-white text-[#0B2545] border-[#FFB703] shadow font-bold'
-                : 'text-slate-200 hover:bg-[#0B2545]/70 border-transparent hover:text-white'
+            className={`h-full px-3.5 flex items-center space-x-2 whitespace-nowrap transition-colors border-b-2 text-xs font-semibold cursor-pointer ${isActive
+                ? 'bg-white text-[#0B2545] border-b-[#FFB703] font-bold shadow-xs'
+                : 'text-slate-200 hover:bg-[#0B2545]/70 hover:text-white border-b-transparent'
               }`}
           >
-            <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-[#134074]' : 'text-slate-300'}`} />
-            <span>{tab.label}</span>
+            <span className="w-4 h-4 flex items-center justify-center shrink-0">
+              <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-[#134074]' : 'text-slate-300'}`} />
+            </span>
+            <span className="leading-none">{tab.label}</span>
           </button>
         );
       })}

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import AppBrand from './AppBrand';
 import {
   Clock,
   User,
@@ -139,22 +140,22 @@ export default function Header({ onTabChange, activeTab }) {
   };
 
   const getRoleBadge = (role, dept) => {
-    if (role === 'railway_planner') {
+    if (role === 'railway_planner' || role === 'planner') {
       return (
-        <span className="bg-amber-500 text-slate-950 font-black px-2 py-0.5 text-[11px] border border-amber-300 tracking-wider uppercase">
+        <span className="h-4.5 inline-flex items-center bg-amber-500 text-slate-950 font-black px-2 text-[10px] border border-amber-300 tracking-wider uppercase leading-none">
           CHIEF SECTION CONTROLLER
         </span>
       );
     }
-    if (role === 'admin') {
+    if (role === 'admin' || role === 'system_admin') {
       return (
-        <span className="bg-purple-600 text-white font-bold px-2 py-0.5 text-[11px] border border-purple-300 uppercase">
+        <span className="h-4.5 inline-flex items-center bg-purple-600 text-white font-bold px-2 text-[10px] border border-purple-300 uppercase leading-none">
           SYSTEM ADMIN
         </span>
       );
     }
     return (
-      <span className="bg-emerald-600 text-white font-bold px-2 py-0.5 text-[11px] border border-emerald-300 uppercase">
+      <span className="h-4.5 inline-flex items-center bg-emerald-600 text-white font-bold px-2 text-[10px] border border-emerald-300 uppercase leading-none">
         DEPT: {dept || 'ENGG'}
       </span>
     );
@@ -164,8 +165,8 @@ export default function Header({ onTabChange, activeTab }) {
     const s = (provenance.status || '').toUpperCase();
     if (s === 'LIVE RADAR' || s === 'LIVE') {
       return (
-        <div className="flex items-center space-x-1.5 text-slate-300">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+        <div className="flex items-center space-x-1.5 text-slate-300 leading-none">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
           <span>DATA SOURCE: <strong className="text-white font-semibold">RailRadar</strong></span>
           <span className="text-slate-600">|</span>
           <span>TELEMETRY: <strong className="text-emerald-400 font-bold">● LIVE</strong></span>
@@ -174,7 +175,7 @@ export default function Header({ onTabChange, activeTab }) {
     }
     if (s === 'CACHED' || s === 'STALE') {
       return (
-        <div className="flex items-center space-x-1.5 text-slate-300">
+        <div className="flex items-center space-x-1.5 text-slate-300 leading-none">
           <span className="w-2 h-2 rounded-full bg-amber-400"></span>
           <span>DATA SOURCE: <strong className="text-white font-semibold">RailRadar</strong></span>
           <span className="text-slate-600">|</span>
@@ -183,7 +184,7 @@ export default function Header({ onTabChange, activeTab }) {
       );
     }
     return (
-      <div className="flex items-center space-x-1.5 text-slate-300">
+      <div className="flex items-center space-x-1.5 text-slate-300 leading-none">
         <span className="w-2 h-2 rounded-full bg-rose-500"></span>
         <span>DATA SOURCE: <strong className="text-white font-semibold">RailRadar</strong></span>
         <span className="text-slate-600">|</span>
@@ -206,54 +207,38 @@ export default function Header({ onTabChange, activeTab }) {
   };
 
   return (
-    <header className="bg-[#0B2545] text-white border-b-2 border-[#FFB703] px-4 py-2 flex flex-wrap items-center justify-between shadow-md relative z-40">
-      {/* Left: Indian Railways Brand */}
-      <div className="flex items-center space-x-3">
-        <div className="w-9 h-9 bg-[#FFB703] flex items-center justify-center font-black text-[#0B2545] text-lg border border-white shadow">
-          IR
-        </div>
-        <div>
-          <div className="flex items-center space-x-2">
-            <h1 className="font-black text-base tracking-wide text-white uppercase font-sans">
-              INDIAN RAILWAYS &bull; AUTOMATIC BLOCK PLANNING SYSTEM
-            </h1>
-            <span className="bg-emerald-950 text-emerald-300 px-1.5 py-0.2 text-[10px] font-mono border border-emerald-600 flex items-center gap-1">
-              <Radio className="w-2.5 h-2.5 animate-pulse text-emerald-400" />
-              CRIS OP-NET
-            </span>
+    <header className="h-20 min-h-[80px] bg-[#0B2545] text-white border-b-2 border-[#FFB703] px-4 flex items-center justify-between shadow-md relative z-40 shrink-0 select-none">
+      {/* ── ZONE 1: LEFT - Official ABPS Brand & System Identity ── */}
+      <div className="flex items-center space-x-3 shrink-0 py-1">
+        <AppBrand variant="header" logoHeight="68px" />
+      </div>
+
+      {/* ── ZONE 2 & 3: RIGHT - Telemetry, Alerts & Compact Logout ── */}
+      <div className="flex items-center space-x-2.5 shrink-0">
+        {/* Telemetry Strip */}
+        <div className="flex items-center space-x-2.5 text-[10px] font-mono bg-[#081b33] px-2.5 h-7 border border-slate-700 shrink-0">
+          <div className="flex items-center space-x-1 text-slate-300 leading-none">
+            <Clock className="w-3 h-3 text-[#FFB703]" />
+            <span>IR-RTC: <strong className="text-white font-bold">{currentTime} IST</strong></span>
           </div>
-          <p className="text-[11px] text-slate-300 font-normal">
-            SIH26027 &bull; Real-Time Multi-Department Track Possession & CP-SAT Optimization Workstation
-          </p>
+          <span className="text-slate-600">|</span>
+          {renderProvenanceIndicator()}
+          <span className="text-slate-600">|</span>
+          <div className="text-slate-300 leading-none">
+            ZONE: <strong className="text-[#FFB703]">SOUTHERN RAILWAY (SR)</strong>
+          </div>
         </div>
-      </div>
 
-      {/* Center: Live Telemetry & Data Provenance */}
-      <div className="hidden lg:flex items-center space-x-4 text-[11px] font-mono bg-[#081b33] px-3 py-1 border border-slate-700">
-        <div className="flex items-center space-x-1.5 text-slate-300">
-          <Clock className="w-3.5 h-3.5 text-[#FFB703]" />
-          <span>IR-RTC: <strong className="text-white font-bold">{currentTime} IST</strong></span>
-        </div>
-        <span className="text-slate-600">|</span>
-        {renderProvenanceIndicator()}
-        <span className="text-slate-600">|</span>
-        <div className="text-slate-300">
-          ZONE: <strong className="text-[#FFB703]">SOUTHERN RAILWAY (SR)</strong>
-        </div>
-      </div>
-
-      {/* Right: Notifications, User Role & Actions */}
-      <div className="flex items-center space-x-3">
         {/* Notification Bell Dropdown */}
         <div className="relative" ref={notifDropdownRef}>
           <button
             onClick={handleToggleNotifications}
             title="Operational Notifications & Handshake Alerts"
-            className="relative p-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 hover:text-white transition-colors cursor-pointer"
+            className="h-7 w-7 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 hover:text-white flex items-center justify-center transition-colors cursor-pointer relative"
           >
-            <Bell className="w-4 h-4" />
+            <Bell className="w-3.5 h-3.5" />
             {unreadCount > 0 && (
-              <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white font-mono font-black text-[9px] min-w-[17px] h-[17px] flex items-center justify-center rounded-full border border-white px-0.5 animate-pulse shadow">
+              <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white font-mono font-black text-[9px] min-w-[16px] h-[16px] flex items-center justify-center rounded-full border border-white px-0.5 animate-pulse shadow">
                 {unreadCount > 99 ? '99+' : unreadCount}
               </span>
             )}
@@ -342,23 +327,19 @@ export default function Header({ onTabChange, activeTab }) {
           )}
         </div>
 
-        {/* User Identity & Logout */}
+        {/* Integrated User / Logout Block */}
         {currentUser ? (
-          <div className="flex items-center space-x-2">
-            {getRoleBadge(currentUser.role, currentUser.department_code)}
-            <div className="text-right hidden sm:block">
-              <div className="text-[12px] font-bold text-white flex items-center justify-end gap-1">
-                <User className="w-3.5 h-3.5 text-slate-300" />
-                <span>{currentUser.full_name}</span>
-              </div>
-              <div className="text-[10px] text-slate-300 font-mono">{currentUser.username}</div>
-            </div>
+          <div className="flex items-center gap-2 pl-2.5 border-l border-slate-700 h-7 shrink-0">
+            <span className="text-[10px] font-bold text-slate-300 font-mono hidden 2xl:inline truncate max-w-[120px]">
+              {currentUser.full_name?.split('/')[0]?.trim() || 'Planner'}
+            </span>
             <button
               onClick={handleLogout}
               title="Logout from Railway Terminal"
-              className="bg-slate-800 hover:bg-red-900 border border-slate-600 p-1.5 text-slate-200 hover:text-white transition-colors cursor-pointer"
+              className="h-7 px-2 bg-slate-800 hover:bg-red-900 border border-slate-600 text-slate-200 hover:text-white flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider transition-colors cursor-pointer shrink-0"
             >
-              <LogOut className="w-3.5 h-3.5" />
+              <LogOut className="w-3 h-3" />
+              <span className="font-bold">Logout</span>
             </button>
           </div>
         ) : (

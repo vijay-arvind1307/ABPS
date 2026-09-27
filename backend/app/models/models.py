@@ -343,6 +343,13 @@ class MaintenanceJob(Base):
     safety_tier = Column(String(20), default="Tier 4")
     priority_explanation = Column(JSON, nullable=True)
 
+    # ML Maintenance Risk Prediction (SIH26027 Advisory Layer)
+    ml_risk_score = Column(Float, nullable=True)
+    ml_risk_class = Column(String(20), nullable=True)
+    ai_assisted_priority_score = Column(Float, nullable=True)
+    ml_model_version = Column(String(50), nullable=True)
+    ml_explanation = Column(JSON, nullable=True)
+
     # Planner Override
     planner_override_score = Column(Float, nullable=True)
     planner_override_reason = Column(Text, nullable=True)
@@ -539,7 +546,7 @@ class CoordinatedBlockPlan(Base):
     plan_date = Column(DateTime, nullable=True)
     start_min = Column(Integer, nullable=False)  # e.g. 645 for 10:45
     end_min = Column(Integer, nullable=False)    # e.g. 735 for 12:15
-    duration_min = Column(Integer, nullable=False)  # e.g. 90
+    duration_min = Column(Integer, nullable=False, default=90)  # e.g. 90
     status = Column(String(30), default="PROPOSED")  # PROPOSED, APPROVED, REJECTED, MODIFIED, ACCEPTED, IN_PROGRESS, COMPLETED
     strategy = Column(String(30), default="PLAN_A")  # PLAN_A, PLAN_B, PLAN_C
     objective_score = Column(Float, default=96.0)
@@ -734,4 +741,73 @@ class SystemAlert(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     resolved_by = relationship("User", foreign_keys=[resolved_by_id])
+
+
+class MLPrediction(Base):
+    """
+    Auditable log of Machine Learning Maintenance Risk predictions.
+    SIH26027: Preserves historical predictions across model versions without overwriting.
+    """
+    __tablename__ = "ml_predictions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(Integer, ForeignKey("maintenance_jobs.id"), nullable=False, index=True)
+    job_code = Column(String(50), nullable=True, index=True)
+    model_version = Column(String(50), nullable=False)
+    risk_score = Column(Float, nullable=False)
+    risk_class = Column(String(20), nullable=False)  # LOW, MEDIUM, HIGH, CRITICAL
+    feature_version = Column(String(50), default="v1.0")
+    prediction_timestamp = Column(DateTime, default=datetime.utcnow)
+    prediction_status = Column(String(40), default="ML PREDICTION AVAILABLE")
+    explanation_json = Column(JSON, nullable=True)
+    features_json = Column(JSON, nullable=True)
+    data_source = Column(String(50), default="SIMULATED")
+
+    request = relationship("MaintenanceJob", foreign_keys=[request_id])
+
+
+class PlanModificationProposal(Base):
+    """
+    SIH26027: Auditable Plan Modification Proposals.
+    Enables Planner -> Department alternative time proposal, independent department review,
+    and formal acceptance/rejection workflow without silently overwriting original request timings.
+    """
+    __tablename__ = "plan_modification_proposals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(Integer, ForeignKey("maintenance_jobs.id"), nullable=False, index=True)
+    block_plan_id = Column(Integer, ForeignKey("coordinated_block_plans.id"), nullable=True, index=True)
+    department_id = Column(Integer, ForeignKey("departments.id"), nullable=False, index=True)
+    proposed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Original requested timings (strictly preserved)
+    original_start_min = Column(Integer, nullable=False)
+    original_end_min = Column(Integer, nullable=False)
+    original_time_window = Column(String(50), nullable=True)
+
+    # Proposed alternative timings
+    proposed_start_min = Column(Integer, nullable=False)
+    proposed_end_min = Column(Integer, nullable=False)
+    proposed_time_window = Column(String(50), nullable=True)
+    proposed_duration_min = Column(Integer, nullable=False)
+
+    reason = Column(Text, nullable=False)
+    status = Column(String(40), default="PENDING_DEPARTMENT_RESPONSE", index=True)  # PENDING_DEPARTMENT_RESPONSE, ACCEPTED, REJECTED, CANCELLED
+
+    # Department response tracking
+    responded_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    responded_at = Column(DateTime, nullable=True)
+    department_remarks = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    request = relationship("MaintenanceJob", foreign_keys=[request_id])
+    block_plan = relationship("CoordinatedBlockPlan", foreign_keys=[block_plan_id])
+    department = relationship("Department", foreign_keys=[department_id])
+    proposed_by = relationship("User", foreign_keys=[proposed_by_id])
+    responded_by = relationship("User", foreign_keys=[responded_by_id])
+
+
 

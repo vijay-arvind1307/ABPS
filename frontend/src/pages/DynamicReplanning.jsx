@@ -118,11 +118,14 @@ export default function DynamicReplanning() {
       {/* Top Header */}
       <div className="bg-white p-3 border border-slate-300 flex flex-wrap items-center justify-between gap-2 shadow-xs">
         <div>
-          <h2 className="font-bold text-sm text-[#0B2545] uppercase tracking-wide flex items-center gap-1.5">
+          <div className="text-[10px] text-slate-500 font-mono font-bold uppercase tracking-wider leading-none mb-1">
+            ABPS &mdash; Automatic Block Planning System
+          </div>
+          <h2 className="font-bold text-sm text-[#0B2545] uppercase tracking-wide flex items-center gap-1.5 leading-tight">
             <Shuffle className="w-4 h-4 text-[#134074]" />
-            DYNAMIC RE-PLANNING & DISTURBANCE RESOLUTION CONTROL ROOM
+            DYNAMIC RE-PLANNING &amp; DISTURBANCE RESOLUTION CONTROL ROOM
           </h2>
-          <p className="text-[11px] text-slate-500">
+          <p className="text-[11px] text-slate-500 mt-0.5">
             Rolling-horizon disturbance re-optimization: Freezes completed/protected blocks and resolves train delay conflicts via CP-SAT.
           </p>
         </div>

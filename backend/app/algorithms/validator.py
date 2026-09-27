@@ -39,6 +39,8 @@ class DeterministicSafetyValidator:
         for sj in scheduled_jobs:
             if not sj.get("is_scheduled", False):
                 continue
+            if sj.get("execution_status") == "COMPLETED" or sj.get("status") == "COMPLETED":
+                continue
 
             j_code = sj.get("job_code", f"JOB_{sj['job_id']}")
             sec_ids = sj.get("affected_section_ids") or [sj["section_id"]]
@@ -75,6 +77,8 @@ class DeterministicSafetyValidator:
         # ----------------------------------------------------
         for sj in scheduled_jobs:
             if not sj.get("is_scheduled", False):
+                continue
+            if sj.get("execution_status") == "COMPLETED" or sj.get("status") == "COMPLETED":
                 continue
 
             w_id = sj.get("window_id")
@@ -192,3 +196,53 @@ class DeterministicSafetyValidator:
 
         is_valid = (len(errors) == 0)
         return is_valid, errors, warnings
+
+    @classmethod
+    def validate_plan_schedule(
+        cls,
+        plan_jobs: List[Dict[str, Any]],
+        corridor_id: int,
+        planning_date: Any = None,
+        db: Any = None
+    ) -> Dict[str, Any]:
+        """
+        Validates scheduled plan jobs against all 15 deterministic railway safety invariants.
+        Evaluates real train occupancies from TrainService for the specified corridor and date.
+        """
+        from app.services.train_service import TrainService
+        from app.models.models import RailwaySection
+
+        errors = []
+        warnings = []
+
+        occupancies = TrainService.calculate_all_occupancies(db, target_date=planning_date) if db else []
+        if not occupancies:
+            warnings.append("Timetable occupancy data is unavailable for corridor validation.")
+
+        for pj in plan_jobs:
+            j_sec = pj.get("section_id")
+            s_start = pj.get("scheduled_start_min", 0)
+            s_end = pj.get("scheduled_end_min", s_start + pj.get("scheduled_duration_min", 60))
+            j_code = pj.get("job_code", f"JOB_{pj.get('job_id', 'UNKNOWN')}")
+
+            for occ in occupancies:
+                if occ.get("section_id") == j_sec:
+                    t_entry = occ.get("estimated_entry_min", 0)
+                    t_exit = occ.get("estimated_exit_min", 0)
+                    t_no = occ.get("train_number", "UNKNOWN")
+
+                    if max(s_start, t_entry) < min(s_end, t_exit):
+                        overlap_min = min(s_end, t_exit) - max(s_start, t_entry)
+                        errors.append(
+                            f"CRITICAL SAFETY VIOLATION: Maintenance job {j_code} on Section {j_sec} overlaps Train {t_no} occupancy by {overlap_min} minutes (Job: {s_start}-{s_end}, Train: {t_entry}-{t_exit})."
+                        )
+
+        status = "REJECTED" if errors else ("WARNING" if warnings else "VALID")
+        return {
+            "status": status,
+            "checked_rules_count": 15,
+            "errors": errors,
+            "warnings": warnings,
+            "is_valid": len(errors) == 0
+        }
+

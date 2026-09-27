@@ -469,11 +469,14 @@ export default function TrainPosition() {
       {/* Top Header */}
       <div className="bg-white p-3 border border-slate-300 flex flex-wrap items-center justify-between gap-2 shadow-sm">
         <div>
-          <h2 className="font-bold text-sm text-[#0B2545] uppercase tracking-wide flex items-center gap-1.5">
+          <div className="text-[10px] text-slate-500 font-mono font-bold uppercase tracking-wider leading-none mb-1">
+            ABPS &mdash; Automatic Block Planning System
+          </div>
+          <h2 className="font-bold text-sm text-[#0B2545] uppercase tracking-wide flex items-center gap-1.5 leading-tight">
             <Radio className="w-4 h-4 text-emerald-600 animate-pulse" />
-            LIVE TRAIN POSITION & GEOMETRIC SECTION MAPPING (RAILRADAR INTEGRATED)
+            LIVE TRAIN POSITION &amp; GEOMETRIC SECTION MAPPING (RAILRADAR INTEGRATED)
           </h2>
-          <p className="text-[11px] text-slate-500">
+          <p className="text-[11px] text-slate-500 mt-0.5">
             Real-time GPS telemetry from RailRadar projected onto selected railway corridor geometry.
           </p>
         </div>

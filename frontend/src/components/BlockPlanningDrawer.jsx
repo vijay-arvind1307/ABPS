@@ -490,7 +490,7 @@ export default function BlockPlanningDrawer({
 
       {/* ── DRAWER FOOTER ─────────────────────────────────── */}
       <div className="bg-[#070D18] px-3.5 py-2 border-t border-slate-800 text-[10px] font-mono text-slate-400 flex items-center justify-between shrink-0">
-        <span>IR-ABPS SIH26027</span>
+        <span>ABPS &mdash; Automatic Block Planning System</span>
         <button onClick={onClose} className="text-cyan-400 hover:underline">
           [CLOSE]
         </button>

@@ -8,14 +8,19 @@ from pydantic import BaseModel
 from app.db.session import get_db
 from app.models.models import (
     MaintenanceJob, Department, Corridor, RailwaySection, BlockPlan,
-    CoordinatedBlockPlan, PlanJob, User, AuditLog, Notification, Train
+    CoordinatedBlockPlan, PlanJob, User, AuditLog, Notification, Train,
+    PlanModificationProposal
 )
 from app.schemas.schemas import (
     MaintenanceJobCreate, MaintenanceJobUpdate, MaintenanceJobResponse,
     CoordinationCheckRequest, CoordinationOptimizeRequest,
     CoordinatedPlanDecisionRequest, CoordinatedPlanWhatIfRequest,
-    CoordinatedBlockPlanResponse
+    CoordinatedBlockPlanResponse,
+    AlternativeValidationRequest, AlternativeValidationResponse,
+    PlanModificationCreateRequest, DepartmentProposalActionRequest,
+    PlanModificationProposalResponse, BlockPlanModificationsSummaryResponse
 )
+from app.algorithms.windows import WindowEngine
 from app.services.maintenance_service import MaintenanceService
 from app.services.planning_service import PlanningService
 from app.services.train_service import TrainService
@@ -1193,11 +1198,124 @@ def get_block_request_audit(
 coordinated_router = APIRouter(prefix="/coordinated-block-plans", tags=["Coordinated Block Plans"])
 
 
+def _validate_window_feasibility(
+    db: Session,
+    section_ids: List[int],
+    corridor_id: int,
+    start_min: int,
+    end_min: int,
+    duration_min: int,
+    exclude_plan_id: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Validates proposed window against train occupancies and existing blocks.
+    Reuses WindowEngine.check_requested_window.
+    """
+    occupancies = TrainService.calculate_all_occupancies(db) or []
+
+    q = db.query(CoordinatedBlockPlan).filter(
+        CoordinatedBlockPlan.status.in_(["APPROVED", "COMMITTED", "ACTIVE"])
+    )
+    if exclude_plan_id:
+        q = q.filter(CoordinatedBlockPlan.id != exclude_plan_id)
+    existing_blocks_db = q.all()
+    existing_blocks = [
+        {
+            "section_id": b.section_id,
+            "start_min": b.start_min,
+            "end_min": b.end_min,
+            "plan_code": b.plan_code
+        }
+        for b in existing_blocks_db if b.section_id
+    ]
+
+    sec_ids = section_ids if section_ids else [1]
+    res = WindowEngine.check_requested_window(
+        section_ids=sec_ids,
+        corridor_id=corridor_id or 1,
+        req_start_min=start_min,
+        req_end_min=end_min,
+        duration_min=duration_min,
+        occupancies=occupancies,
+        existing_blocks=existing_blocks
+    )
+    return res
+
+
+def _serialize_proposal(p: PlanModificationProposal, db: Session) -> Dict[str, Any]:
+    job = p.request
+    plan = p.block_plan
+    dept = p.department
+    sec_name = None
+    if job:
+        if job.section:
+            sec_name = job.section.name
+        elif job.section_id:
+            s_obj = db.query(RailwaySection).filter(RailwaySection.id == job.section_id).first()
+            if s_obj:
+                sec_name = s_obj.name
+        if not sec_name and job.start_station_code and job.end_station_code:
+            sec_name = f"{job.start_station_code} → {job.end_station_code}"
+    if not sec_name and plan:
+        sec_name = plan.section_name or f"SECTION-{plan.section_id or 103}"
+
+    return {
+        "id": p.id,
+        "request_id": p.request_id,
+        "request_code": job.job_code if job else f"REQ-{p.request_id}",
+        "block_plan_id": p.block_plan_id,
+        "block_plan_code": plan.plan_code if plan else (f"BP-{p.block_plan_id:03d}" if p.block_plan_id else None),
+        "department_id": p.department_id,
+        "department_code": dept.code if dept else f"DEPT-{p.department_id}",
+        "department_name": dept.name if dept else "Engineering",
+        "section_name": sec_name or "MDU → TDN",
+        "work_type": job.work_type if job else "Track Maintenance",
+        "work_title": (job.work_title or job.work_type) if job else "Track Maintenance",
+        "proposed_by_id": p.proposed_by_id,
+        "proposed_by_name": p.proposed_by.full_name if p.proposed_by else "Chief Controller",
+        "original_start_min": p.original_start_min,
+        "original_end_min": p.original_end_min,
+        "original_time_window": p.original_time_window or f"{p.original_start_min//60:02d}:{p.original_start_min%60:02d} – {p.original_end_min//60:02d}:{p.original_end_min%60:02d}",
+        "proposed_start_min": p.proposed_start_min,
+        "proposed_end_min": p.proposed_end_min,
+        "proposed_time_window": p.proposed_time_window or f"{p.proposed_start_min//60:02d}:{p.proposed_start_min%60:02d} – {p.proposed_end_min//60:02d}:{p.proposed_end_min%60:02d}",
+        "proposed_duration_min": p.proposed_duration_min,
+        "reason": p.reason,
+        "status": p.status,
+        "responded_by_id": p.responded_by_id,
+        "responded_by_name": p.responded_by.full_name if p.responded_by else None,
+        "responded_at": p.responded_at.isoformat() if p.responded_at else None,
+        "department_remarks": p.department_remarks,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+    }
+
+
 def _serialize_coordinated_plan(plan: CoordinatedBlockPlan, db: Session) -> Dict[str, Any]:
     jobs = db.query(MaintenanceJob).filter(MaintenanceJob.coordinated_plan_id == plan.id).all()
     start_hh, start_mm = divmod(plan.start_min, 60)
     end_hh, end_mm = divmod(plan.end_min, 60)
     time_window = f"{start_hh:02d}:{start_mm:02d} – {end_hh:02d}:{end_mm:02d}"
+
+    # Query active modification proposals for this plan
+    proposals = db.query(PlanModificationProposal).filter(
+        PlanModificationProposal.block_plan_id == plan.id,
+        ~PlanModificationProposal.status.in_(["CANCELLED", "SUPERSEDED"])
+    ).all()
+
+    dept_responses = {}
+    for p in proposals:
+        d_code = p.department.code if p.department else f"DEPT-{p.department_id}"
+        dept_responses[d_code] = p.status
+
+    overall_mod_status = None
+    if proposals:
+        if any(p.status == "REJECTED" for p in proposals):
+            overall_mod_status = "MODIFICATION_REJECTED"
+        elif all(p.status == "ACCEPTED" for p in proposals):
+            overall_mod_status = "ALL_DEPARTMENTS_ACCEPTED"
+        else:
+            overall_mod_status = "WAITING_FOR_RESPONSES"
 
     return {
         "id": plan.id,
@@ -1232,6 +1350,10 @@ def _serialize_coordinated_plan(plan: CoordinatedBlockPlan, db: Session) -> Dict
         "planner_remarks": plan.planner_reason or plan.modification_reason,
         "rejection_reason": plan.rejection_reason,
         "modification_reason": plan.modification_reason,
+        "department_responses": dept_responses,
+        "modification_overall_status": overall_mod_status,
+        "proposals_count": len(proposals),
+        "proposals": [_serialize_proposal(p, db) for p in proposals],
         "created_at": plan.created_at.isoformat() if plan.created_at else None,
         "approved_at": plan.approved_at.isoformat() if plan.approved_at else None,
         "savings": {
@@ -1390,7 +1512,9 @@ def approve_coordinated_block_plan(
 
 
 @coordinated_router.post("/{id}/modify")
+@coordinated_router.post("/{id}/propose-modification")
 @router.post("/coordinated-plans/{id}/modify")
+@router.post("/coordinated-plans/{id}/propose-modification")
 def modify_coordinated_block_plan(
     id: int,
     req: CoordinatedPlanDecisionRequest,
@@ -1398,7 +1522,12 @@ def modify_coordinated_block_plan(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Railway Planner modifies common block window with mandatory reason.
+    Railway Planner modifies common block window with mandatory operational reason.
+    SIH26027 Workflow:
+    1. Validates alternative time against train occupancies & existing blocks.
+    2. Preserves original requested times on department requests.
+    3. Creates PlanModificationProposal for EACH affected department.
+    4. Routes to affected department dashboards under 'MODIFICATION REQUESTED'.
     """
     if not is_planner(current_user):
         raise HTTPException(status_code=403, detail="Railway Planner authority required to modify coordinated plans.")
@@ -1416,41 +1545,131 @@ def modify_coordinated_block_plan(
     if req and req.version is not None and (plan.version or 1) != req.version:
         raise HTTPException(status_code=409, detail=f"Concurrency conflict: Plan version {plan.version} has been modified by another planner. Refresh and try again.")
 
-    if req.recommended_start_min is not None:
-        plan.start_min = req.recommended_start_min
-    if req.recommended_end_min is not None:
-        plan.end_min = req.recommended_end_min
-        plan.duration_min = max(15, plan.end_min - plan.start_min)
+    new_start_min = req.recommended_start_min if req.recommended_start_min is not None else plan.start_min
+    new_end_min = req.recommended_end_min if req.recommended_end_min is not None else plan.end_min
+    if new_end_min <= new_start_min:
+        raise HTTPException(status_code=400, detail="Invalid time range: End time must be after start time.")
+    new_duration = max(15, new_end_min - new_start_min)
 
-    plan.status = "MODIFIED"
-    plan.version = (plan.version or 1) + 1
-    plan.modification_reason = req.reason.strip()
+    # 1. VALIDATE ALTERNATIVE BEFORE SENDING
+    sec_ids = [plan.section_id] if plan.section_id else [1]
+    check_res = _validate_window_feasibility(
+        db=db,
+        section_ids=sec_ids,
+        corridor_id=plan.corridor_id or 1,
+        start_min=new_start_min,
+        end_min=new_end_min,
+        duration_min=new_duration,
+        exclude_plan_id=plan.id
+    )
 
+    if not check_res.get("is_feasible"):
+        conflicts = check_res.get("conflicts", [])
+        conflicts_desc = []
+        for c in conflicts[:3]:
+            if c.get("type") == "TRAIN_CONFLICT":
+                t_num = c.get("train_number")
+                t_name = c.get("train_name") or "Express"
+                entry_str = f"{c.get('entry_min', 0)//60:02d}:{c.get('entry_min', 0)%60:02d}"
+                exit_str = f"{c.get('exit_min', 0)//60:02d}:{c.get('exit_min', 0)%60:02d}"
+                conflicts_desc.append(f"Train {t_num} ({t_name}) [{entry_str}–{exit_str}]")
+            else:
+                conflicts_desc.append(f"Existing Block {c.get('block_code', 'Committed')}")
+        conflict_msg = f"ALTERNATIVE TIME NOT FEASIBLE: Conflict detected with {', '.join(conflicts_desc) if conflicts_desc else 'scheduled train operation'}. Please select a different window."
+        raise HTTPException(status_code=400, detail=conflict_msg)
+
+    # 2. DO NOT SILENTLY OVERWRITE ORIGINAL REQUEST
+    # Identify ALL affected linked requests across departments
     linked_jobs = db.query(MaintenanceJob).filter(MaintenanceJob.coordinated_plan_id == plan.id).all()
+    if not linked_jobs and plan.work_breakdown_json:
+        codes = [item.get("job_code") for item in plan.work_breakdown_json if item.get("job_code")]
+        if codes:
+            linked_jobs = db.query(MaintenanceJob).filter(MaintenanceJob.job_code.in_(codes)).all()
+            for j in linked_jobs:
+                j.coordinated_plan_id = plan.id
+
+    if not linked_jobs:
+        # Fallback: link jobs matching section or corridor in recommended status
+        linked_jobs = db.query(MaintenanceJob).filter(
+            MaintenanceJob.section_id == plan.section_id,
+            MaintenanceJob.status.in_(["RECOMMENDED", "SUBMITTED", "PLANNING", "UNDER_REVIEW"])
+        ).limit(3).all()
+        for j in linked_jobs:
+            j.coordinated_plan_id = plan.id
+
+    prop_time_str = f"{new_start_min//60:02d}:{new_start_min%60:02d} – {new_end_min//60:02d}:{new_end_min%60:02d}"
+
+    # 3. Create PlanModificationProposal for EACH affected department/request
     for j in linked_jobs:
-        j.preferred_start_min = plan.start_min
-        j.preferred_end_min = plan.end_min
+        orig_s = j.preferred_start_min if j.preferred_start_min is not None else plan.start_min
+        orig_e = j.preferred_end_min if j.preferred_end_min is not None else plan.end_min
+        orig_time_str = f"{orig_s//60:02d}:{orig_s%60:02d} – {orig_e//60:02d}:{orig_e%60:02d}"
+
+        # Supersede any previous proposals for this job and plan
+        db.query(PlanModificationProposal).filter(
+            PlanModificationProposal.request_id == j.id,
+            PlanModificationProposal.block_plan_id == plan.id,
+            PlanModificationProposal.status.in_(["PENDING_DEPARTMENT_RESPONSE", "REJECTED", "ACCEPTED"])
+        ).update({"status": "SUPERSEDED"}, synchronize_session=False)
+
+        proposal = PlanModificationProposal(
+            request_id=j.id,
+            block_plan_id=plan.id,
+            department_id=j.department_id,
+            proposed_by_id=current_user.id,
+            original_start_min=orig_s,
+            original_end_min=orig_e,
+            original_time_window=orig_time_str,
+            proposed_start_min=new_start_min,
+            proposed_end_min=new_end_min,
+            proposed_time_window=prop_time_str,
+            proposed_duration_min=new_duration,
+            reason=req.reason.strip(),
+            status="PENDING_DEPARTMENT_RESPONSE"
+        )
+        db.add(proposal)
+
+        # Update request status to MODIFICATION_REQUESTED without overwriting preferred_start/end times!
+        old_st = j.status
+        j.status = "MODIFICATION_REQUESTED"
         history = list(j.state_history_json or [])
         history.append({
-            "from_state": j.status,
-            "to_state": "MODIFIED_BY_PLANNER",
+            "from_state": old_st,
+            "to_state": "MODIFICATION_REQUESTED",
             "acting_user": current_user.username,
             "timestamp": datetime.utcnow().isoformat(),
-            "reason": f"Common block {plan.plan_code} modified: {req.reason.strip()}"
+            "reason": f"Planner proposed alternative window {prop_time_str} (Original: {orig_time_str}): {req.reason.strip()}"
         })
         j.state_history_json = history
 
+        # Notify affected department
+        notif = Notification(
+            department_id=j.department_id,
+            title=f"Plan Modification Proposed: {plan.plan_code} ({j.job_code})",
+            message=f"Planner proposed alternative time {prop_time_str} (Original: {orig_time_str}) for {j.job_code}. Reason: {req.reason.strip()}. Please review and accept/reject.",
+            notification_type="MODIFICATION_PROPOSAL",
+            target_entity="COORDINATED_BLOCK_PLAN",
+            target_id=str(plan.id)
+        )
+        db.add(notif)
+
+    # 4. Update plan status and version
+    plan.status = "MODIFICATION_REQUESTED"
+    plan.version = (plan.version or 1) + 1
+    plan.modification_reason = req.reason.strip()
+
     audit = AuditLog(
         user_id=current_user.id,
-        action="PLAN_MODIFIED",
+        action="PLANNER_PROPOSED_MODIFICATION",
         entity_type="COORDINATED_BLOCK_PLAN",
         entity_id=str(plan.id),
         details_json={
             "plan_code": plan.plan_code,
             "reason": req.reason.strip(),
-            "new_start_min": plan.start_min,
-            "new_end_min": plan.end_min,
-            "new_duration_min": plan.duration_min
+            "proposed_start_min": new_start_min,
+            "proposed_end_min": new_end_min,
+            "proposed_window": prop_time_str,
+            "affected_requests": [j.job_code for j in linked_jobs]
         }
     )
     db.add(audit)
@@ -1773,4 +1992,343 @@ def get_coordinated_plan_audit(
         }
         for a in audits
     ]
+
+
+# =============================================================
+# SIH26027: PLAN MODIFICATION & DEPARTMENT RESPONSE ENDPOINTS
+# =============================================================
+
+@coordinated_router.post("/{id}/validate-alternative", response_model=AlternativeValidationResponse)
+@coordinated_router.post("/validate-alternative", response_model=AlternativeValidationResponse)
+@router.post("/validate-alternative", response_model=AlternativeValidationResponse)
+def validate_alternative_time_endpoint(
+    req: AlternativeValidationRequest,
+    id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Validates proposed alternative time against live/persisted train occupancies and existing blocks.
+    Reuses WindowEngine interval sweep check.
+    """
+    plan = None
+    if id:
+        plan = db.query(CoordinatedBlockPlan).filter(CoordinatedBlockPlan.id == id).first()
+
+    sec_ids = req.section_ids or ([req.section_id] if req.section_id else ([plan.section_id] if plan and plan.section_id else [1]))
+    corr_id = req.corridor_id or (plan.corridor_id if plan else 1)
+    s_min = req.start_min if req.start_min is not None else (req.recommended_start_min if req.recommended_start_min is not None else (plan.start_min if plan else 0))
+    e_min = req.end_min if req.end_min is not None else (req.recommended_end_min if req.recommended_end_min is not None else (plan.end_min if plan else 60))
+    duration_min = req.duration_min or max(15, e_min - s_min)
+
+    check_res = _validate_window_feasibility(
+        db=db,
+        section_ids=sec_ids,
+        corridor_id=corr_id,
+        start_min=s_min,
+        end_min=e_min,
+        duration_min=duration_min,
+        exclude_plan_id=id
+    )
+
+    is_feasible = bool(check_res.get("is_feasible"))
+    conflicts = check_res.get("conflicts", [])
+    alternatives = check_res.get("feasible_alternatives") or check_res.get("recommended_alternatives") or []
+
+    if is_feasible:
+        msg = "ALTERNATIVE TIME VALIDATED: Window is conflict-free and operationally feasible."
+        status_code = "FEASIBLE"
+    else:
+        conflicts_desc = []
+        for c in conflicts[:3]:
+            if c.get("type") == "TRAIN_CONFLICT":
+                t_num = c.get("train_number")
+                t_name = c.get("train_name") or "Express"
+                entry_str = f"{c.get('entry_min', 0)//60:02d}:{c.get('entry_min', 0)%60:02d}"
+                exit_str = f"{c.get('exit_min', 0)//60:02d}:{c.get('exit_min', 0)%60:02d}"
+                conflicts_desc.append(f"Train {t_num} ({t_name}) [{entry_str}–{exit_str}]")
+            else:
+                conflicts_desc.append(f"Block {c.get('block_code', 'Committed')}")
+        msg = f"ALTERNATIVE TIME NOT FEASIBLE: Conflict with {', '.join(conflicts_desc) if conflicts_desc else 'scheduled train operation'}."
+        status_code = "INFEASIBLE"
+
+    return {
+        "is_feasible": is_feasible,
+        "status": status_code,
+        "message": msg,
+        "conflicts_count": len(conflicts),
+        "conflicts": conflicts,
+        "recommended_alternatives": alternatives
+    }
+
+
+@router.get("/department/modifications", response_model=List[PlanModificationProposalResponse])
+@coordinated_router.get("/department/modifications", response_model=List[PlanModificationProposalResponse])
+def get_department_modifications(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Department fetches pending modification proposals requiring response.
+    RBAC: Non-planner department users can only view their own department proposals.
+    """
+    q = db.query(PlanModificationProposal)
+    if not is_planner(current_user):
+        if not current_user.department_id:
+            return []
+        q = q.filter(PlanModificationProposal.department_id == current_user.department_id)
+
+    proposals = q.filter(
+        ~PlanModificationProposal.status.in_(["CANCELLED", "SUPERSEDED"])
+    ).order_by(PlanModificationProposal.created_at.desc()).all()
+
+    return [_serialize_proposal(p, db) for p in proposals]
+
+
+@coordinated_router.get("/{id}/modifications", response_model=BlockPlanModificationsSummaryResponse)
+@router.get("/coordinated-plans/{id}/modifications", response_model=BlockPlanModificationsSummaryResponse)
+def get_plan_modifications(
+    id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Planner retrieves detailed response breakdown across departments for a coordinated block plan.
+    """
+    plan = db.query(CoordinatedBlockPlan).filter(CoordinatedBlockPlan.id == id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Coordinated block plan not found.")
+
+    proposals = db.query(PlanModificationProposal).filter(
+        PlanModificationProposal.block_plan_id == plan.id,
+        ~PlanModificationProposal.status.in_(["CANCELLED", "SUPERSEDED"])
+    ).order_by(PlanModificationProposal.id.asc()).all()
+
+    if not proposals:
+        return {
+            "block_plan_id": plan.id,
+            "block_plan_code": plan.plan_code,
+            "proposed_time_window": f"{plan.start_min//60:02d}:{plan.start_min%60:02d} – {plan.end_min//60:02d}:{plan.end_min%60:02d}",
+            "proposed_start_min": plan.start_min,
+            "proposed_end_min": plan.end_min,
+            "overall_status": "NO_MODIFICATION_PENDING",
+            "proposals": []
+        }
+
+    first_p = proposals[0]
+    overall_status = "WAITING_FOR_RESPONSES"
+    if any(p.status == "REJECTED" for p in proposals):
+        overall_status = "MODIFICATION_REJECTED"
+    elif all(p.status == "ACCEPTED" for p in proposals):
+        overall_status = "ALL_DEPARTMENTS_ACCEPTED"
+
+    return {
+        "block_plan_id": plan.id,
+        "block_plan_code": plan.plan_code,
+        "proposed_time_window": first_p.proposed_time_window,
+        "proposed_start_min": first_p.proposed_start_min,
+        "proposed_end_min": first_p.proposed_end_min,
+        "overall_status": overall_status,
+        "proposals": [_serialize_proposal(p, db) for p in proposals]
+    }
+
+
+@router.post("/modifications/{id}/accept", response_model=PlanModificationProposalResponse)
+@coordinated_router.post("/modifications/{id}/accept", response_model=PlanModificationProposalResponse)
+def accept_modification_proposal(
+    id: int,
+    req: Optional[DepartmentProposalActionRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Department accepts planner's proposed alternative window.
+    CRITICAL: Revalidates proposed time against live conditions before persisting acceptance.
+    Preserves original requested time in audit history.
+    """
+    proposal = db.query(PlanModificationProposal).filter(PlanModificationProposal.id == id).first()
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Modification proposal not found.")
+
+    # Authorization: Must be proposal's department or Admin/Planner
+    if not (is_planner(current_user) or (current_user.department_id and current_user.department_id == proposal.department_id)):
+        raise HTTPException(status_code=403, detail="Forbidden: You can only accept modifications addressed to your own department.")
+
+    if proposal.status != "PENDING_DEPARTMENT_RESPONSE":
+        raise HTTPException(status_code=400, detail=f"Proposal is not pending response (current status: {proposal.status}).")
+
+    # 1. REVALIDATE ON ACCEPT (Section 7 & 13)
+    job = proposal.request
+    plan = proposal.block_plan
+    sec_id = (job.section_id if job else None) or (plan.section_id if plan else 1)
+    corr_id = (job.corridor_id if job else None) or (plan.corridor_id if plan else 1)
+
+    recheck_res = _validate_window_feasibility(
+        db=db,
+        section_ids=[sec_id],
+        corridor_id=corr_id,
+        start_min=proposal.proposed_start_min,
+        end_min=proposal.proposed_end_min,
+        duration_min=proposal.proposed_duration_min,
+        exclude_plan_id=plan.id if plan else None
+    )
+
+    if not recheck_res.get("is_feasible"):
+        raise HTTPException(
+            status_code=409,
+            detail="ALTERNATIVE NO LONGER FEASIBLE: The previously proposed time has changed due to updated operational conditions. Please return to planner review."
+        )
+
+    # 2. Mark proposal ACCEPTED
+    proposal.status = "ACCEPTED"
+    proposal.responded_by_id = current_user.id
+    proposal.responded_at = datetime.utcnow()
+    proposal.department_remarks = req.remarks.strip() if req and req.remarks else "Accepted alternative window"
+
+    # 3. Update job scheduled times and state history
+    if job:
+        old_st = job.status
+        job.preferred_start_min = proposal.proposed_start_min
+        job.preferred_end_min = proposal.proposed_end_min
+        job.status = "DEPARTMENT_ACCEPTED"
+        history = list(job.state_history_json or [])
+        history.append({
+            "from_state": old_st,
+            "to_state": "DEPARTMENT_ACCEPTED",
+            "acting_user": current_user.username,
+            "timestamp": datetime.utcnow().isoformat(),
+            "reason": f"Accepted planner alternative {proposal.proposed_time_window} (Original: {proposal.original_time_window}). Remarks: {proposal.department_remarks}"
+        })
+        job.state_history_json = history
+
+    # 4. Multi-department coordination status tracking (Section 9)
+    if plan:
+        all_props = db.query(PlanModificationProposal).filter(
+            PlanModificationProposal.block_plan_id == plan.id,
+            ~PlanModificationProposal.status.in_(["CANCELLED", "SUPERSEDED"])
+        ).all()
+
+        all_accepted = all(p.status == "ACCEPTED" for p in all_props)
+        if all_accepted:
+            plan.status = "ALL_DEPARTMENTS_ACCEPTED"
+            plan.start_min = proposal.proposed_start_min
+            plan.end_min = proposal.proposed_end_min
+            plan.duration_min = proposal.proposed_duration_min
+        else:
+            plan.status = "WAITING_FOR_RESPONSES"
+
+    # 5. Audit log
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="DEPARTMENT_ACCEPTED_MODIFICATION",
+        entity_type="PLAN_MODIFICATION_PROPOSAL",
+        entity_id=str(proposal.id),
+        details_json={
+            "proposal_id": proposal.id,
+            "request_code": job.job_code if job else None,
+            "block_plan_code": plan.plan_code if plan else None,
+            "department": proposal.department.name if proposal.department else None,
+            "original_window": proposal.original_time_window,
+            "accepted_window": proposal.proposed_time_window,
+            "remarks": proposal.department_remarks
+        }
+    )
+    db.add(audit)
+
+    # 6. Notify planner
+    notif = Notification(
+        department_id=None,
+        title=f"Modification Accepted: {proposal.department.code if proposal.department else 'Dept'}",
+        message=f"{proposal.department.name if proposal.department else 'Department'} ACCEPTED alternative window {proposal.proposed_time_window} for {job.job_code if job else 'job'}.",
+        notification_type="MODIFICATION_ACCEPTED",
+        target_entity="COORDINATED_BLOCK_PLAN",
+        target_id=str(plan.id if plan else "")
+    )
+    db.add(notif)
+
+    db.commit()
+    db.refresh(proposal)
+    return _serialize_proposal(proposal, db)
+
+
+@router.post("/modifications/{id}/reject", response_model=PlanModificationProposalResponse)
+@coordinated_router.post("/modifications/{id}/reject", response_model=PlanModificationProposalResponse)
+def reject_modification_proposal(
+    id: int,
+    req: Optional[DepartmentProposalActionRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Department rejects planner's proposed alternative window.
+    Original requested time remains intact and preserved.
+    Routes block plan back to planner review.
+    """
+    proposal = db.query(PlanModificationProposal).filter(PlanModificationProposal.id == id).first()
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Modification proposal not found.")
+
+    if not (is_planner(current_user) or (current_user.department_id and current_user.department_id == proposal.department_id)):
+        raise HTTPException(status_code=403, detail="Forbidden: You can only reject modifications addressed to your own department.")
+
+    if proposal.status != "PENDING_DEPARTMENT_RESPONSE":
+        raise HTTPException(status_code=400, detail=f"Proposal is not pending response (current status: {proposal.status}).")
+
+    proposal.status = "REJECTED"
+    proposal.responded_by_id = current_user.id
+    proposal.responded_at = datetime.utcnow()
+    proposal.department_remarks = req.remarks.strip() if req and req.remarks else "Alternative time window rejected by department"
+
+    job = proposal.request
+    plan = proposal.block_plan
+
+    # Original requested times strictly preserved on job
+    if job:
+        old_st = job.status
+        job.status = "MODIFICATION_REJECTED"
+        history = list(job.state_history_json or [])
+        history.append({
+            "from_state": old_st,
+            "to_state": "MODIFICATION_REJECTED",
+            "acting_user": current_user.username,
+            "timestamp": datetime.utcnow().isoformat(),
+            "reason": f"Rejected planner alternative {proposal.proposed_time_window}. Remarks: {proposal.department_remarks}"
+        })
+        job.state_history_json = history
+
+    if plan:
+        plan.status = "MODIFICATION_REJECTED"
+
+    # Audit log
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="DEPARTMENT_REJECTED_MODIFICATION",
+        entity_type="PLAN_MODIFICATION_PROPOSAL",
+        entity_id=str(proposal.id),
+        details_json={
+            "proposal_id": proposal.id,
+            "request_code": job.job_code if job else None,
+            "block_plan_code": plan.plan_code if plan else None,
+            "department": proposal.department.name if proposal.department else None,
+            "original_window": proposal.original_time_window,
+            "rejected_window": proposal.proposed_time_window,
+            "remarks": proposal.department_remarks
+        }
+    )
+    db.add(audit)
+
+    # Notify planner
+    notif = Notification(
+        department_id=None,
+        title=f"Modification Rejected: {proposal.department.code if proposal.department else 'Dept'}",
+        message=f"{proposal.department.name if proposal.department else 'Department'} REJECTED alternative window {proposal.proposed_time_window} for {job.job_code if job else 'job'}. Operational review required.",
+        notification_type="MODIFICATION_REJECTED",
+        target_entity="COORDINATED_BLOCK_PLAN",
+        target_id=str(plan.id if plan else "")
+    )
+    db.add(notif)
+
+    db.commit()
+    db.refresh(proposal)
+    return _serialize_proposal(proposal, db)
 

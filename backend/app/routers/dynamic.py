@@ -99,6 +99,7 @@ def dynamic_replan(
             "job_code": j.job_code,
             "department_code": j.department.code if j.department else "ENGG",
             "section_id": j.section_id,
+            "affected_section_ids": j.affected_sections_json if j.affected_sections_json else ([j.section_id] if j.section_id else []),
             "location_km": j.location_km,
             "work_type": j.work_type,
             "criticality": j.criticality,

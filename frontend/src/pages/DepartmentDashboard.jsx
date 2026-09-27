@@ -51,7 +51,10 @@ import {
   updateExecutionProgress,
   completeExecution,
   getNotifications,
-  markNotificationRead
+  markNotificationRead,
+  getDepartmentModifications,
+  acceptModificationProposal,
+  rejectModificationProposal
 } from '../services/api';
 import { getCurrentUser } from '../services/auth';
 import StationAutocomplete from '../components/StationAutocomplete';
@@ -66,8 +69,15 @@ export default function DepartmentDashboard() {
   const [corridorSections, setCorridorSections] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // 11 Operational Control Panel Positions:
-  // MY_REQUESTS, NEW_DEMAND, PENDING, APPROVED_PLANS, WORK_ACCEPTED, IN_PROGRESS, COMPLETED, BLOCK_STATUS, EXECUTION_STATUS, NOTIFICATIONS, HISTORY
+  // Planner Modification Proposals (SIH26027)
+  const [modifications, setModifications] = useState([]);
+  const [showRejectModal, setShowRejectModal] = useState(false);
+  const [selectedProposal, setSelectedProposal] = useState(null);
+  const [rejectRemarks, setRejectRemarks] = useState('');
+  const [actionNotice, setActionNotice] = useState(null);
+
+  // 12 Operational Control Panel Positions:
+  // MY_REQUESTS, PLANNER_MODIFICATIONS, PENDING, APPROVED_PLANS, WORK_ACCEPTED, IN_PROGRESS, COMPLETED, BLOCK_STATUS, EXECUTION_STATUS, NOTIFICATIONS, HISTORY
   const [activeTab, setActiveTab] = useState('MY_REQUESTS');
 
   // Modals
@@ -153,12 +163,13 @@ export default function DepartmentDashboard() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [jobsRes, planRes, execRes, notifRes, corrRes] = await Promise.all([
+      const [jobsRes, planRes, execRes, notifRes, corrRes, modRes] = await Promise.all([
         getBlockRequests().catch(() => getMaintenanceJobs({ department_id: user?.department_id })),
         getActivePlan('PLAN_A').catch(() => ({ data: null })),
         getExecutionRecords().catch(() => ({ data: [] })),
         getNotifications().catch(() => ({ data: [] })),
-        getCorridors().catch(() => ({ data: [] }))
+        getCorridors().catch(() => ({ data: [] })),
+        getDepartmentModifications().catch(() => ({ data: [] }))
       ]);
 
       setJobs(jobsRes.data || []);
@@ -166,10 +177,59 @@ export default function DepartmentDashboard() {
       setExecutionRecords(execRes.data || []);
       setNotifications(notifRes.data || []);
       setCorridors(corrRes.data || []);
+      setModifications(modRes.data || []);
     } catch (err) {
       console.error('[ABPS Department] Load failure:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Proposal Acceptance & Rejection Handlers (SIH26027)
+  const handleAcceptProposal = async (proposal) => {
+    setActionLoading(true);
+    setActionNotice(null);
+    try {
+      await acceptModificationProposal(proposal.id);
+      setActionNotice({
+        type: 'success',
+        message: `Alternative window (${proposal.proposed_time_window}) for ${proposal.request_code || 'demand'} accepted successfully! Request & plan timings updated.`
+      });
+      await loadData();
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      const msg = typeof detail === 'string' ? detail : (detail?.message || 'Failed to accept modification proposal.');
+      setActionNotice({
+        type: 'error',
+        message: msg
+      });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleOpenRejectModal = (proposal) => {
+    setSelectedProposal(proposal);
+    setRejectRemarks('');
+    setShowRejectModal(true);
+  };
+
+  const handleConfirmRejectProposal = async (e) => {
+    if (e) e.preventDefault();
+    if (!selectedProposal) return;
+    setActionLoading(true);
+    try {
+      await rejectModificationProposal(selectedProposal.id, { remarks: rejectRemarks.trim() });
+      setShowRejectModal(false);
+      setActionNotice({
+        type: 'success',
+        message: `Modification for ${selectedProposal.request_code || 'demand'} rejected. Original request window preserved and routed back to planner review.`
+      });
+      await loadData();
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to reject modification proposal.');
+    } finally {
+      setActionLoading(false);
     }
   };
 
@@ -659,6 +719,7 @@ export default function DepartmentDashboard() {
   const acceptedJobs = jobs.filter(j => ['DEPARTMENT_ACCEPTED', 'SCHEDULED', 'READY'].includes(j.status));
   const inProgressJobs = jobs.filter(j => j.status === 'IN_PROGRESS' || j.execution_status === 'IN_PROGRESS');
   const completedJobs = jobs.filter(j => j.status === 'COMPLETED' || j.execution_status === 'COMPLETED');
+  const pendingModifications = modifications.filter(m => m.status === 'PENDING_DEPARTMENT_RESPONSE');
 
   // Find approved plan matching active plan
   const isPlanApprovedForDept = activePlan && activePlan.approval_status === 'APPROVED' &&
@@ -673,8 +734,11 @@ export default function DepartmentDashboard() {
             <Wrench className="w-5 h-5 text-[#FFB703]" />
           </div>
           <div>
-            <h2 className="font-bold text-sm text-[#0B2545] uppercase tracking-wide">
-              DEPARTMENT MAINTENANCE CONTROL PANEL &bull; {deptName} ({deptCode})
+            <div className="text-[10px] text-slate-500 font-mono font-bold uppercase tracking-wider leading-none mb-1">
+              ABPS &bull; Automatic Block Planning System
+            </div>
+            <h2 className="font-bold text-sm text-[#0B2545] uppercase tracking-wide leading-tight">
+              DEPARTMENT MAINTENANCE PORTAL &bull; {deptName} ({deptCode})
             </h2>
             <div className="flex items-center space-x-2 text-[11px] text-slate-600">
               <span>Section Engineer: <strong className="text-slate-800">{user?.full_name}</strong></span>
@@ -684,23 +748,50 @@ export default function DepartmentDashboard() {
               <span>Pending Planner: <strong className="text-amber-700">{pendingRequests.length}</strong></span>
               <span>&bull;</span>
               <span>Track Possessions Active: <strong className="text-orange-700">{inProgressJobs.length}</strong></span>
+              <span>&bull;</span>
+              <span>Modifications Pending: <strong className={pendingModifications.length > 0 ? "text-red-700 font-bold" : "text-slate-800"}>{pendingModifications.length}</strong></span>
             </div>
           </div>
         </div>
 
         <button
           onClick={handleOpenCreateModal}
-          className="bg-[#134074] hover:bg-[#0B2545] text-white font-bold px-3 py-1.5 text-xs flex items-center space-x-1.5 transition-colors border border-[#0B2545] shadow-xs"
+          className="bg-[#134074] hover:bg-[#0B2545] text-white font-bold px-3 py-1.5 text-xs flex items-center space-x-1.5 transition-colors border border-[#0B2545] shadow-xs cursor-pointer"
         >
           <PlusCircle className="w-4 h-4 text-[#FFB703]" />
           <span>NEW MAINTENANCE DEMAND</span>
         </button>
       </div>
 
-      {/* 11 Section 5 Navigation Tabs */}
+      {/* Operational Alert Banner for Pending Planner Modifications (SIH26027) */}
+      {pendingModifications.length > 0 && (
+        <div className="bg-amber-500/10 border-2 border-amber-600 p-2.5 flex items-center justify-between shadow-xs">
+          <div className="flex items-center space-x-2.5">
+            <AlertTriangle className="w-5 h-5 text-amber-700 animate-pulse shrink-0" />
+            <div>
+              <span className="font-bold text-amber-900 text-xs uppercase tracking-wide">
+                OPERATIONAL ACTION REQUIRED: {pendingModifications.length} PLANNER MODIFICATION PROPOSAL{pendingModifications.length > 1 ? 'S' : ''} AWAITING DEPARTMENT REVIEW
+              </span>
+              <div className="text-[11px] text-amber-800">
+                Railway Planner proposed alternative possession timings. Review original requested vs proposed windows and Accept or Reject.
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => setActiveTab('PLANNER_MODIFICATIONS')}
+            className="cris-btn bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs uppercase px-3 py-1.5 shrink-0 flex items-center space-x-1 cursor-pointer"
+          >
+            <span>REVIEW MODIFICATIONS ({pendingModifications.length})</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* 12 Section 5 Navigation Tabs */}
       <div className="flex flex-wrap gap-1 border-b border-slate-300 bg-white p-1 text-xs">
         {[
           { id: 'MY_REQUESTS', label: `My Requests (${myRequests.length})`, icon: FileText },
+          { id: 'PLANNER_MODIFICATIONS', label: `Planner Modifications (${pendingModifications.length})`, icon: AlertCircle, badge: pendingModifications.length, highlight: pendingModifications.length > 0, pulse: pendingModifications.length > 0 },
           { id: 'PENDING', label: `Pending (${pendingRequests.length})`, icon: Clock },
           { id: 'APPROVED_PLANS', label: `Approved Plans (${approvedJobs.length})`, icon: CheckCircle2, highlight: approvedJobs.length > 0 },
           { id: 'WORK_ACCEPTED', label: `Work Accepted (${acceptedJobs.length})`, icon: CheckSquare },
@@ -1355,6 +1446,203 @@ export default function DepartmentDashboard() {
           </div>
         )}
 
+        {/* TAB: PLANNER MODIFICATIONS (SIH26027 Section 6) */}
+        {activeTab === 'PLANNER_MODIFICATIONS' && (
+          <div>
+            <div className="flex justify-between items-center mb-3">
+              <div>
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wide flex items-center gap-1.5">
+                  <AlertCircle className="w-4 h-4 text-amber-600" />
+                  <span>PLANNER MODIFICATION REQUESTS &bull; DEPARTMENT TIMING REVIEW</span>
+                </h3>
+                <span className="text-[11px] text-slate-500 font-mono">
+                  When Railway Planner proposes an alternative maintenance window, review and Accept or Reject. Original request timings remain preserved.
+                </span>
+              </div>
+              <span className="bg-amber-100 text-amber-900 font-mono font-bold text-xs px-2 py-1 border border-amber-300">
+                Pending Responses: {pendingModifications.length}
+              </span>
+            </div>
+
+            {actionNotice && (
+              <div className={`p-3 mb-3 border text-xs flex items-start gap-2 ${
+                actionNotice.type === 'error'
+                  ? 'bg-red-50 border-red-300 text-red-900'
+                  : 'bg-emerald-50 border-emerald-300 text-emerald-900'
+              }`}>
+                {actionNotice.type === 'error' ? (
+                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                )}
+                <div className="flex-1">
+                  <strong>{actionNotice.type === 'error' ? 'ACTION REJECTED / OPERATIONAL CONFLICT:' : 'SUCCESS:'}</strong> {actionNotice.message}
+                </div>
+                <button onClick={() => setActionNotice(null)} className="text-slate-400 hover:text-slate-700 font-bold ml-2 cursor-pointer">✕</button>
+              </div>
+            )}
+
+            {modifications.length === 0 ? (
+              <div className="p-8 text-center text-slate-500 border border-dashed border-slate-300 bg-slate-50">
+                <Clock className="w-8 h-8 mx-auto text-slate-400 mb-2" />
+                <div className="font-bold text-sm">NO PENDING PLANNER MODIFICATIONS</div>
+                <div className="text-xs text-slate-400 mt-1">
+                  All maintenance demands are either adhering to original requested windows or currently being planned.
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {modifications.map(prop => {
+                  const isPending = prop.status === 'PENDING_DEPARTMENT_RESPONSE';
+                  const isAccepted = prop.status === 'ACCEPTED';
+                  const isRejected = prop.status === 'REJECTED';
+
+                  return (
+                    <div
+                      key={prop.id}
+                      className={`border-2 shadow-xs transition-all ${
+                        isPending
+                          ? 'border-amber-500 bg-white'
+                          : isAccepted
+                          ? 'border-emerald-500 bg-emerald-50/20'
+                          : 'border-slate-300 bg-slate-50/50'
+                      }`}
+                    >
+                      {/* Header matching CRIS specification */}
+                      <div className={`p-2.5 flex justify-between items-center text-xs font-bold uppercase tracking-wide border-b ${
+                        isPending
+                          ? 'bg-amber-600 text-white'
+                          : isAccepted
+                          ? 'bg-emerald-700 text-white'
+                          : 'bg-slate-700 text-white'
+                      }`}>
+                        <div className="flex items-center gap-1.5">
+                          <Layers className="w-3.5 h-3.5 text-[#FFB703]" />
+                          <span>PLANNER MODIFICATION REQUEST</span>
+                        </div>
+                        <span className="font-mono text-[11px] bg-black/20 px-2 py-0.5">
+                          {isPending ? 'MODIFICATION REQUESTED' : prop.status}
+                        </span>
+                      </div>
+
+                      {/* Card Content Grid */}
+                      <div className="p-3 space-y-2.5 text-xs">
+                        <div className="grid grid-cols-2 gap-2 border-b border-slate-200 pb-2">
+                          <div>
+                            <span className="text-[10px] text-slate-500 font-bold block uppercase">Request:</span>
+                            <span className="font-mono font-bold text-slate-900 text-sm">{prop.request_code}</span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-slate-500 font-bold block uppercase">Block Plan:</span>
+                            <span className="font-mono font-bold text-[#0B2545]">{prop.block_plan_code || 'COORDINATED BLOCK'}</span>
+                          </div>
+                        </div>
+
+                        {/* Timing Comparison: Original vs Proposed */}
+                        <div className="grid grid-cols-2 gap-2 bg-slate-50 p-2.5 border border-slate-200">
+                          <div className="border-r border-slate-200 pr-2">
+                            <span className="text-[10px] text-slate-500 font-bold block uppercase flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-slate-400" />
+                              <span>ORIGINAL REQUEST</span>
+                            </span>
+                            <span className="font-mono font-bold text-slate-700 text-xs block mt-0.5">
+                              {prop.original_time_window}
+                            </span>
+                            <span className="text-[10px] text-slate-400 font-mono">
+                              ({Math.max(15, (prop.original_end_min || 0) - (prop.original_start_min || 0))} min)
+                            </span>
+                          </div>
+
+                          <div className="pl-1">
+                            <span className="text-[10px] text-amber-700 font-bold block uppercase flex items-center gap-1">
+                              <Calendar className="w-3 h-3 text-amber-600" />
+                              <span>PLANNER PROPOSED</span>
+                            </span>
+                            <span className="font-mono font-black text-amber-900 text-xs block mt-0.5 bg-amber-100/80 px-1 py-0.5 border border-amber-300">
+                              {prop.proposed_time_window}
+                            </span>
+                            <span className="text-[10px] text-amber-800 font-mono">
+                              ({prop.proposed_duration_min} min window)
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Section & Work */}
+                        <div className="grid grid-cols-2 gap-2 text-[11px]">
+                          <div>
+                            <span className="text-[10px] text-slate-500 font-bold block uppercase">Section:</span>
+                            <span className="font-bold text-slate-800">{prop.section_name || 'Corridor Section'}</span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-slate-500 font-bold block uppercase">Work:</span>
+                            <span className="font-bold text-slate-800">{prop.work_title || prop.work_type}</span>
+                          </div>
+                        </div>
+
+                        {/* Operational Reason */}
+                        <div className="bg-amber-50/60 p-2 border border-amber-200">
+                          <span className="text-[10px] font-bold text-amber-900 block uppercase mb-0.5">
+                            Planner Operational Justification:
+                          </span>
+                          <div className="text-[11px] text-slate-800 italic">
+                            "{prop.reason}"
+                          </div>
+                          {prop.proposed_by_name && (
+                            <span className="text-[10px] text-slate-500 block mt-1 font-mono">
+                              Proposed by: {prop.proposed_by_name} &bull; {new Date(prop.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Response remarks if already responded */}
+                        {!isPending && (
+                          <div className={`p-2 border text-[11px] ${
+                            isAccepted ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-900'
+                          }`}>
+                            <div className="font-bold uppercase text-[10px]">
+                              {isAccepted ? '✓ DEPARTMENT ACCEPTED' : '✕ DEPARTMENT REJECTED'}
+                            </div>
+                            <div className="mt-0.5">Remarks: {prop.department_remarks || (isAccepted ? 'Alternative window accepted' : 'Declined')}</div>
+                            {prop.responded_at && (
+                              <div className="text-[10px] text-slate-500 mt-1 font-mono">
+                                Responded on: {new Date(prop.responded_at).toLocaleString()}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Action Buttons for Pending Proposals */}
+                        {isPending && (
+                          <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-200">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenRejectModal(prop)}
+                              disabled={actionLoading}
+                              className="cris-btn bg-red-700 hover:bg-red-800 text-white font-bold text-xs uppercase px-3 py-1.5 flex items-center gap-1 cursor-pointer"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                              <span>REJECT</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAcceptProposal(prop)}
+                              disabled={actionLoading}
+                              className="cris-btn bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs uppercase px-4 py-1.5 flex items-center gap-1.5 cursor-pointer shadow-xs"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>ACCEPT ALTERNATIVE</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* TAB 10: REQUEST HISTORY */}
         {activeTab === 'HISTORY' && (
           <div>
@@ -1387,6 +1675,55 @@ export default function DepartmentDashboard() {
           </div>
         )}
       </div>
+
+      {/* MODAL: REJECT PLANNER MODIFICATION (SIH26027 Section 8) */}
+      {showRejectModal && selectedProposal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-3">
+          <div className="bg-white border-2 border-red-700 shadow-2xl max-w-md w-full">
+            <div className="bg-red-700 text-white p-3 flex justify-between items-center">
+              <div className="font-bold text-xs uppercase tracking-wide flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-white" />
+                <span>REJECT PLANNER MODIFICATION &bull; {selectedProposal.request_code}</span>
+              </div>
+              <button onClick={() => setShowRejectModal(false)} className="text-slate-300 hover:text-white cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleConfirmRejectProposal} className="p-4 space-y-3 text-xs">
+              <div className="bg-red-50 p-2.5 border border-red-200 text-red-900 text-[11px]">
+                <strong>Department Rejection Notice:</strong> Rejecting this alternative timing will preserve your original requested window (<strong>{selectedProposal.original_time_window}</strong>) and return the coordinated plan back to the Railway Planner for operational review.
+              </div>
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Mandatory Department Rejection Reason / Remarks:</label>
+                <textarea
+                  value={rejectRemarks}
+                  onChange={(e) => setRejectRemarks(e.target.value)}
+                  className="w-full border border-slate-300 p-2 text-slate-800 focus:border-red-700 outline-none"
+                  rows="3"
+                  placeholder="e.g., Track maintenance gang cannot mobilize before 16:00 due to prior materials staging..."
+                  required
+                />
+              </div>
+              <div className="pt-2 flex items-center justify-between border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setShowRejectModal(false)}
+                  className="cris-btn cris-btn-secondary text-xs cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={actionLoading}
+                  className="cris-btn bg-red-700 hover:bg-red-800 text-white font-bold text-xs uppercase px-3 py-1.5 flex items-center gap-1 cursor-pointer"
+                >
+                  <span>Confirm Rejection</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* MODAL 1: NEW MAINTENANCE DEMAND */}
       {showNewDemandModal && (

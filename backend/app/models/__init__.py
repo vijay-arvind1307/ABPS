@@ -3,5 +3,6 @@ from app.models.models import (
     TrainRouteStop, TrainMovement, TrainSectionOccupancy, Asset,
     MaintenanceJob, MaintenanceDependency, Resource, MaintenanceJobResource,
     BlockDemand, BlockWindow, BlockPlan, CoordinatedBlockPlan, PlanJob, PlanVersion,
-    WhatIfScenario, ExecutionRecord, PlannerAction, AuditLog, SystemConfig
+    WhatIfScenario, ExecutionRecord, PlannerAction, AuditLog, SystemConfig,
+    MLPrediction, PlanModificationProposal
 )

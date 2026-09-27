@@ -62,12 +62,15 @@ export default function AvailableWindows() {
     <div className="p-3 space-y-3">
       <div className="bg-white p-3 border border-slate-300 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h2 className="font-bold text-sm text-[#0B2545] uppercase tracking-wide flex items-center gap-1.5">
+          <div className="text-[10px] text-slate-500 font-mono font-bold uppercase tracking-wider leading-none mb-1">
+            ABPS &mdash; Automatic Block Planning System
+          </div>
+          <h2 className="font-bold text-sm text-[#0B2545] uppercase tracking-wide flex items-center gap-1.5 leading-tight">
             <Clock className="w-4 h-4 text-[#134074]" />
             MATHEMATICALLY DERIVED MAINTENANCE WINDOWS (SWEEP-LINE ENGINE)
           </h2>
-          <p className="text-[11px] text-slate-500">
-            W = TrainFreeWindow ∩ CorridorAvailability ∩ OperationalAvailability (5 min safety buffers applied).
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            W = TrainFreeWindow &cap; CorridorAvailability &cap; OperationalAvailability (5 min safety buffers applied).
           </p>
         </div>
 

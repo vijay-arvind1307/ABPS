@@ -515,16 +515,18 @@ def test_09_modify_common_plan(planner_auth, engg_auth, snt_auth, corridor_and_s
     }, headers=planner_auth).json()
 
     mod_res = client.post(f"/api/coordinated-block-plans/{plan['id']}/modify", json={
-        "recommended_start_min": 660,
-        "recommended_end_min": 750,
-        "reason": "Shifted 15 min later to guarantee 25 min headway behind Vande Bharat Express"
+        "recommended_start_min": 1040,
+        "recommended_end_min": 1130,
+        "reason": "Shifted to afternoon window to guarantee headway behind Vande Bharat Express"
     }, headers=planner_auth)
 
     assert mod_res.status_code == 200
     updated_plan = mod_res.json()
-    assert updated_plan["start_min"] == 660
-    assert updated_plan["end_min"] == 750
+    assert updated_plan["status"] == "MODIFICATION_REQUESTED"
     assert "Vande Bharat" in updated_plan["planner_remarks"]
+    assert len(updated_plan.get("proposals", [])) == 2
+    assert updated_plan["proposals"][0]["proposed_start_min"] == 1040
+    assert updated_plan["proposals"][0]["proposed_end_min"] == 1130
 
 
 # ============================================================================
