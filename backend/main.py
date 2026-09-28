@@ -1,97 +1,74 @@
 import os
 import sys
 import traceback
-import json
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 backend_dir = os.path.dirname(os.path.abspath(__file__))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-_cached_app = None
+app = FastAPI(
+    title="Railway Maintenance Block Planning API (IR-ABPS)",
+    description="AI-Assisted Maintenance Block Planning and Constraint Optimization Platform for Indian Railways",
+    version="1.0.0"
+)
+
+# Robust CORS Setup
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^https://.*\.vercel\.app$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 _import_error = None
+_real_app = None
 
-def get_app():
-    global _cached_app, _import_error
-    if _cached_app is not None:
-        return _cached_app
-    if _import_error is not None:
-        return None
-    try:
-        from app.main import app as fastapi_app
-        _cached_app = fastapi_app
-        return _cached_app
-    except Exception as e:
-        _import_error = traceback.format_exc()
-        print("ERROR LOADING APP.MAIN:\n", _import_error)
-        return None
+# Ping and diagnostic endpoints
+@app.get("/api/test-ping")
+@app.get("/test-ping")
+def test_ping():
+    return {
+        "status": "PONG",
+        "has_real_app": _real_app is not None,
+        "total_routes": len(app.router.routes),
+        "import_error": _import_error,
+        "python": sys.version,
+        "cwd": os.getcwd()
+    }
 
-async def app(scope, receive, send):
-    if scope["type"] == "lifespan":
-        while True:
-            message = await receive()
-            if message["type"] == "lifespan.startup":
-                get_app()
-                await send({"type": "lifespan.startup.complete"})
-            elif message["type"] == "lifespan.shutdown":
-                await send({"type": "lifespan.shutdown.complete"})
-                return
+try:
+    from app.main import app as _real_app
+    existing = {(r.path, tuple(sorted(getattr(r, "methods", None) or []))) for r in app.router.routes}
+    for r in _real_app.router.routes:
+        k = (r.path, tuple(sorted(getattr(r, "methods", None) or [])))
+        if k not in existing:
+            app.router.routes.append(r)
+            existing.add(k)
+    print(f"[INIT] Successfully registered {len(app.router.routes)} routes from app.main.")
+except Exception as e:
+    _import_error = traceback.format_exc()
+    print("[INIT FATAL] Error importing app.main:\n", _import_error)
 
-    if scope["type"] == "http":
-        path = scope.get("path", "")
-        if path in ("/api/test-ping", "/test-ping"):
-            real = get_app()
-            res_data = {
-                "status": "PONG" if real else "APP_IMPORT_FAILED",
-                "routes": len(real.routes) if real else 0,
-                "error": _import_error,
-                "python": sys.version,
-                "cwd": os.getcwd()
+    @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
+    def import_error_fallback(path: str):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "BACKEND_INITIALIZATION_ERROR",
+                "message": "FastAPI failed to import backend modules on Vercel serverless runtime.",
+                "traceback": _import_error
             }
-            body = json.dumps(res_data).encode("utf-8")
-            await send({
-                "type": "http.response.start",
-                "status": 200 if real else 500,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode("ascii")),
-                ],
-            })
-            await send({"type": "http.response.body", "body": body})
-            return
-
-    real_app = get_app()
-    if real_app is not None:
-        try:
-            await real_app(scope, receive, send)
-        except Exception as e:
-            err_data = {
-                "status": "APPLICATION_EXECUTION_ERROR",
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }
-            body = json.dumps(err_data).encode("utf-8")
-            await send({
-                "type": "http.response.start",
-                "status": 500,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode("ascii")),
-                ],
-            })
-            await send({"type": "http.response.body", "body": body})
-    else:
-        err_data = {
-            "status": "FATAL_IMPORT_ERROR",
-            "error": "Failed to import app.main on serverless runtime",
-            "traceback": _import_error
-        }
-        body = json.dumps(err_data).encode("utf-8")
-        await send({
-            "type": "http.response.start",
-            "status": 500,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode("ascii")),
-            ],
-        })
-        await send({"type": "http.response.body", "body": body})
+        )
