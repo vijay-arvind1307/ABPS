@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import pandas as pd
 import numpy as np
-import xgboost as xgb
+try:
+    import xgboost as xgb
+except Exception:
+    xgb = None
 
 from app.ml.config import (
     MODEL_PATH,
@@ -102,6 +105,9 @@ class MaintenanceRiskPredictor:
         self._load_model()
 
     def _load_model(self) -> bool:
+        if xgb is None:
+            self._status = "ML LIBRARY NOT INSTALLED"
+            return False
         if not MODEL_PATH.exists():
             self._status = "ML MODEL NOT TRAINED"
             logger.warning(f"XGBoost model file not found at: {MODEL_PATH}")

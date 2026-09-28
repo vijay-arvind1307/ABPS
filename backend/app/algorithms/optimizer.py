@@ -1,6 +1,9 @@
 import time
 from typing import List, Dict, Any, Optional, Tuple
-from ortools.sat.python import cp_model
+try:
+    from ortools.sat.python import cp_model
+except Exception:
+    cp_model = None
 from app.algorithms.coordination import CompatibilityEngine
 
 
@@ -31,6 +34,22 @@ class CPSATSolver:
         custom_weights: Dict[str, float] = None
     ) -> Dict[str, Any]:
         start_wall_time = time.time()
+        if cp_model is None:
+            return {
+                "solver_status": "SOLVER_UNAVAILABLE",
+                "objective_score": 0.0,
+                "critical_jobs_completed": 0,
+                "total_critical_jobs": sum(1 for j in (jobs or []) if ("Tier 1" in j.get("safety_tier", "") or "Tier 2" in j.get("safety_tier", "") or j.get("is_emergency", False))),
+                "total_jobs_completed": 0,
+                "total_jobs_demanded": len(jobs) if jobs else 0,
+                "total_blocks_count": 0,
+                "block_utilization_pct": 0.0,
+                "scheduled_jobs": [],
+                "deferred_jobs": [j["id"] for j in (jobs or [])],
+                "blocks": [],
+                "solve_time_ms": 0,
+                "error": "Google OR-Tools solver is not installed in this environment"
+            }
         model = cp_model.CpModel()
 
         if not jobs or not windows:
