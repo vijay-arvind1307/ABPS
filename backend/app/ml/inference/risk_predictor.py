@@ -15,8 +15,12 @@ import logging
 from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-import pandas as pd
-import numpy as np
+try:
+    import pandas as pd
+    import numpy as np
+except Exception:
+    pd = None
+    np = None
 try:
     import xgboost as xgb
 except Exception:
@@ -105,8 +109,8 @@ class MaintenanceRiskPredictor:
         self._load_model()
 
     def _load_model(self) -> bool:
-        if xgb is None:
-            self._status = "ML LIBRARY NOT INSTALLED"
+        if xgb is None or pd is None or np is None:
+            self._status = "ML LIBRARIES NOT INSTALLED"
             return False
         if not MODEL_PATH.exists():
             self._status = "ML MODEL NOT TRAINED"

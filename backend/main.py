@@ -30,6 +30,7 @@ except Exception as e:
         )
 
 @app.get("/api/test-debug")
+@app.get("/test-debug")
 def test_debug():
     return {
         "status": "OK",
