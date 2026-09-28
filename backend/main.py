@@ -6,39 +6,36 @@ backend_dir = os.path.dirname(os.path.abspath(__file__))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-import_error = None
-try:
-    from app.main import app
-except Exception as e:
-    import_error = traceback.format_exc()
-    from fastapi import FastAPI
-    from fastapi.responses import JSONResponse
-    app = FastAPI()
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
-    @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
-    def catch_all(path_name: str):
+app = FastAPI()
+
+@app.get("/api/test-ping")
+@app.get("/test-ping")
+def test_ping():
+    return {
+        "status": "PONG",
+        "message": "Vercel backend service is running successfully!",
+        "python": sys.version,
+        "cwd": os.getcwd()
+    }
+
+@app.get("/api/test-import-app")
+@app.get("/test-import-app")
+def test_import_app():
+    try:
+        from app.main import app as real_app
+        return {
+            "status": "SUCCESS",
+            "message": "app.main imported cleanly with 0 errors!"
+        }
+    except Exception as e:
         return JSONResponse(
             status_code=500,
             content={
-                "error": "FastAPI App Import Failed on Vercel",
-                "detail": str(e),
-                "traceback": import_error,
-                "sys_path": sys.path,
-                "cwd": os.getcwd(),
-                "files": os.listdir(".") if os.path.exists(".") else []
+                "status": "IMPORT_FAILED",
+                "error": str(e),
+                "traceback": traceback.format_exc()
             }
         )
-
-@app.get("/api/test-debug")
-@app.get("/test-debug")
-def test_debug():
-    return {
-        "status": "OK",
-        "python": sys.version,
-        "cwd": os.getcwd(),
-        "backend_dir": backend_dir,
-        "import_error": import_error
-    }
-
-# Also ensure backend/api/index.py has identical capability
-__all__ = ["app"]
