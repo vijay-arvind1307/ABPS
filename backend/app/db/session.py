@@ -17,6 +17,8 @@ if os.environ.get("VERCEL") and db_url.startswith("sqlite"):
     candidates = [
         os.path.join(backend_dir, "abps.db"),
         os.path.join(backend_dir, "backend", "abps.db"),
+        os.path.join(os.getcwd(), "abps.db"),
+        os.path.join(os.getcwd(), "backend", "abps.db"),
         os.path.join(os.path.dirname(backend_dir), "abps.db"),
         os.path.join(os.path.dirname(backend_dir), "backend", "abps.db"),
     ]
@@ -29,8 +31,12 @@ if os.environ.get("VERCEL") and db_url.startswith("sqlite"):
     if orig_db and (not os.path.exists(tmp_db) or os.path.getsize(tmp_db) == 0):
         try:
             import shutil
-            shutil.copy2(orig_db, tmp_db)
-            print(f"[DB VERCEL] Copied {orig_db} ({os.path.getsize(orig_db)} bytes) to {tmp_db}")
+            shutil.copyfile(orig_db, tmp_db)
+            try:
+                os.chmod(tmp_db, 0o666)
+            except Exception:
+                pass
+            print(f"[DB VERCEL] Copied {orig_db} ({os.path.getsize(orig_db)} bytes) to {tmp_db} (rw mode)")
         except Exception as e:
             print(f"[DB VERCEL] Notice copying abps.db to /tmp: {e}")
     db_url = f"sqlite:///{tmp_db}"

@@ -27,8 +27,11 @@ from app.routers import (
 )
 from app.models.models import User, RailwayStation, Train
 
-# Initialize database schema
-Base.metadata.create_all(bind=engine)
+# Initialize database schema safely
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print(f"[INIT DB] Schema creation notice: {e}")
 
 app = FastAPI(
     title="Railway Maintenance Block Planning API (IR-ABPS)",
@@ -179,52 +182,55 @@ def api_reject_modification(
 
 @app.on_event("startup")
 def startup_event():
-    db = SessionLocal()
     try:
-        # Check if users already exist, if not seed initial operational data
-        user_count = db.query(User).count()
-        if user_count == 0:
-            seed_database(db)
+        db = SessionLocal()
+        try:
+            # Check if users already exist, if not seed initial operational data
+            user_count = db.query(User).count()
+            if user_count == 0:
+                seed_database(db)
 
-        # Skip heavy PDF and train document parsing on Vercel serverless to avoid 10s execution timeout
-        if not os.environ.get("VERCEL"):
-            # Check if railway station master is populated; if not, import from PDF
-            stn_count = db.query(RailwayStation).count()
-            if stn_count == 0:
-                try:
-                    import sys
-                    import os
-                    # Find PDF path
-                    pdf_candidates = [
-                        "documents/TN-station list.pdf",
-                        "../documents/TN-station list.pdf",
-                        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "documents", "TN-station list.pdf")
-                    ]
-                    pdf_found = None
-                    for c in pdf_candidates:
-                        if os.path.exists(c):
-                            pdf_found = c
-                            break
-                    if pdf_found:
-                        from scripts.import_station_master import import_station_master
-                        print(f"[STARTUP] Auto-importing Station Master from {pdf_found}...")
-                        import_station_master(pdf_found)
-                except Exception as e:
-                    print(f"[STARTUP] Station Master auto-import notice: {e}")
+            # Skip heavy PDF and train document parsing on Vercel serverless to avoid 10s execution timeout
+            if not os.environ.get("VERCEL"):
+                # Check if railway station master is populated; if not, import from PDF
+                stn_count = db.query(RailwayStation).count()
+                if stn_count == 0:
+                    try:
+                        import sys
+                        import os
+                        # Find PDF path
+                        pdf_candidates = [
+                            "documents/TN-station list.pdf",
+                            "../documents/TN-station list.pdf",
+                            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "documents", "TN-station list.pdf")
+                        ]
+                        pdf_found = None
+                        for c in pdf_candidates:
+                            if os.path.exists(c):
+                                pdf_found = c
+                                break
+                        if pdf_found:
+                            from scripts.import_station_master import import_station_master
+                            print(f"[STARTUP] Auto-importing Station Master from {pdf_found}...")
+                            import_station_master(pdf_found)
+                    except Exception as e:
+                        print(f"[STARTUP] Station Master auto-import notice: {e}")
 
-            # Check if train master is populated; if not, import railway documents
-            train_count = db.query(Train).count()
-            if train_count == 0:
-                try:
-                    from app.scripts.import_railway_documents import run_import
-                    print("[STARTUP] Auto-importing Railway Documents...")
-                    run_import()
-                except Exception as e:
-                    print(f"[STARTUP] Railway documents auto-import notice: {e}")
-        else:
-            print("[STARTUP] Vercel serverless environment: skipping heavy PDF/Excel imports on cold start.")
-    finally:
-        db.close()
+                # Check if train master is populated; if not, import railway documents
+                train_count = db.query(Train).count()
+                if train_count == 0:
+                    try:
+                        from app.scripts.import_railway_documents import run_import
+                        print("[STARTUP] Auto-importing Railway Documents...")
+                        run_import()
+                    except Exception as e:
+                        print(f"[STARTUP] Railway documents auto-import notice: {e}")
+            else:
+                print("[STARTUP] Vercel serverless environment: skipping heavy PDF/Excel imports on cold start.")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[STARTUP] Warning during startup DB initialization: {e}")
 
     # Start controlled live telemetry background poller for Tamil Nadu network (skip on Vercel serverless)
     try:
