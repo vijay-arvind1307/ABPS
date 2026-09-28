@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 *.db
+!backend/abps.db
 *.db-shm
 *.db-wal
 *.sqlite

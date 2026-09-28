@@ -17,7 +17,17 @@ export default function Login({ onLoginSuccess }) {
       const user = await loginUser(username, password);
       onLoginSuccess(user);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Invalid railway credentials. Please try again.');
+      if (err.response?.data?.detail) {
+        setError(err.response.data.detail);
+      } else if (err.response?.status === 500) {
+        setError('Server Error (500): Backend service encountered an error. Please verify backend logs.');
+      } else if (err.response?.status === 502 || err.response?.status === 504) {
+        setError('Gateway Timeout: Backend function timed out or is restarting. Please retry in a moment.');
+      } else if (err.code === 'ERR_NETWORK' || !err.response) {
+        setError('Network Connection Error: Unable to reach backend API. Check network or backend deployment.');
+      } else {
+        setError('Invalid railway credentials. Please try again.');
+      }
     } finally {
       setLoading(false);
     }

@@ -14,11 +14,23 @@ engine_kwargs = {"echo": settings.DB_ECHO}
 backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if os.environ.get("VERCEL") and db_url.startswith("sqlite"):
     tmp_db = "/tmp/abps.db"
-    orig_db = os.path.join(backend_dir, "abps.db")
-    if os.path.exists(orig_db) and not os.path.exists(tmp_db):
+    candidates = [
+        os.path.join(backend_dir, "abps.db"),
+        os.path.join(backend_dir, "backend", "abps.db"),
+        os.path.join(os.path.dirname(backend_dir), "abps.db"),
+        os.path.join(os.path.dirname(backend_dir), "backend", "abps.db"),
+    ]
+    orig_db = None
+    for c in candidates:
+        if os.path.exists(c) and os.path.getsize(c) > 0:
+            orig_db = c
+            break
+
+    if orig_db and (not os.path.exists(tmp_db) or os.path.getsize(tmp_db) == 0):
         try:
             import shutil
             shutil.copy2(orig_db, tmp_db)
+            print(f"[DB VERCEL] Copied {orig_db} ({os.path.getsize(orig_db)} bytes) to {tmp_db}")
         except Exception as e:
             print(f"[DB VERCEL] Notice copying abps.db to /tmp: {e}")
     db_url = f"sqlite:///{tmp_db}"
@@ -40,14 +52,17 @@ elif "postgresql" in db_url:
 
 engine = create_engine(db_url, **engine_kwargs)
 
-# Configure SQLite WAL mode and pragmas on connect
+# Configure SQLite WAL mode (local) or standard DELETE mode (serverless)
 if db_url.startswith("sqlite"):
     @event.listens_for(engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
         if isinstance(dbapi_connection, sqlite3.Connection):
             cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
+            if not os.environ.get("VERCEL"):
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+            else:
+                cursor.execute("PRAGMA journal_mode=DELETE")
             cursor.execute("PRAGMA busy_timeout=10000")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
