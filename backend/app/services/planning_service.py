@@ -21,7 +21,31 @@ class PlanningService:
         """
         Strictly READ-ONLY query of feasible maintenance windows based on actual occupancy data.
         NEVER mutates or deletes database rows on GET requests.
+        Returns persisted BlockWindow records immediately if present.
         """
+        persisted_query = db.query(BlockWindow)
+        if corridor_id:
+            persisted_query = persisted_query.filter(BlockWindow.corridor_id == corridor_id)
+        persisted = persisted_query.all()
+        if persisted:
+            return [
+                {
+                    "id": bw.id,
+                    "window_code": bw.window_code,
+                    "section_id": bw.section_id,
+                    "corridor_id": bw.corridor_id,
+                    "start_min": bw.start_min,
+                    "end_min": bw.end_min,
+                    "usable_duration_min": bw.usable_duration_min,
+                    "train_before_no": bw.train_before_no,
+                    "train_after_no": bw.train_after_no,
+                    "constraints_applied_json": bw.constraints_applied_json,
+                    "feasibility": bw.feasibility,
+                    "source": bw.source
+                }
+                for bw in persisted
+            ]
+
         occupancies = TrainService.calculate_all_occupancies(db) or []
         sections = db.query(RailwaySection).all()
         if corridor_id:

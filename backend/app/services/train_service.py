@@ -1379,10 +1379,14 @@ class TrainService:
             def dist_to_y(d_km: float) -> float:
                 return round(5.0 + (min(max(0.0, d_km), max_corridor_km) / max_corridor_km) * 90.0, 2)
 
+            stn_codes = [s["code"] for s in route_stns if "code" in s]
+            stn_records = db.query(Station).filter(Station.code.in_(stn_codes)).all()
+            stn_rec_by_code = {s.code: s for s in stn_records}
+
             for idx, s in enumerate(route_stns, start=1):
                 d_km = float(s.get("distance_km", 0.0))
                 stn_code_to_km[s["code"]] = d_km
-                stn_record = db.query(Station).filter(Station.code == s["code"]).first()
+                stn_record = stn_rec_by_code.get(s["code"])
                 if stn_record:
                     stn_map[stn_record.id] = {
                         "station_code": s["code"],
@@ -1491,6 +1495,14 @@ class TrainService:
             trains_db = TrainService.get_trains_for_corridor(db, corridor_id)
         else:
             trains_db = db.query(Train).filter(Train.active == True).all()
+
+        # Phase 34: Bulk prefetch all route stops to eliminate N+1 queries
+        train_nums = [t.train_number for t in trains_db]
+        all_stops = db.query(TrainRouteStop).filter(TrainRouteStop.train_number.in_(train_nums)).order_by(TrainRouteStop.train_number, TrainRouteStop.sequence).all() if train_nums else []
+        stops_by_train = {}
+        for st in all_stops:
+            stops_by_train.setdefault(st.train_number, []).append(st)
+
         trains_resp = []
 
         for t in trains_db:
@@ -1504,8 +1516,8 @@ class TrainService:
             sec_name = m_data.get("section_name")
             m_source = m_data.get("source", "TIMETABLE_MASTER")
 
-            # Route stops
-            stops = db.query(TrainRouteStop).filter(TrainRouteStop.train_number == t.train_number).order_by(TrainRouteStop.sequence).all()
+            # Route stops from pre-grouped dictionary
+            stops = stops_by_train.get(t.train_number, [])
 
             trajectory_points = []
             for st in stops:
@@ -1516,8 +1528,8 @@ class TrainService:
                 arr_min_adj = st.arrival_min + delay_min
                 dep_min_adj = st.departure_min + delay_min
 
-                stn_code = st.station.code if st.station else f"STN_{st.station_id}"
-                stn_name = st.station.name if st.station else stn_code
+                stn_code = st.station_code or (stn_info["station_code"] if stn_info else f"STN_{st.station_id}")
+                stn_name = st.station_name or (stn_info["station_name"] if stn_info else stn_code)
 
                 if st.arrival_min != st.departure_min and st.halt_min > 0:
                     arr_hh = f"{arr_min_adj // 60:02d}:{arr_min_adj % 60:02d}"
@@ -1603,8 +1615,25 @@ class TrainService:
 
         # 7. Occupancies & Feasible Windows
         corridor_sec_ids = {s.id for s in sections}
-        all_occs = TrainService.calculate_all_occupancies(db)
-        occupancies = [o for o in all_occs if o.get("section_id") in corridor_sec_ids]
+        db_occs = db.query(TrainSectionOccupancy).filter(TrainSectionOccupancy.section_id.in_(corridor_sec_ids)).all()
+        if db_occs:
+            occupancies = [
+                {
+                    "train_number": o.train_number,
+                    "section_id": o.section_id,
+                    "direction": o.direction,
+                    "estimated_entry_min": o.estimated_entry_min,
+                    "estimated_exit_min": o.estimated_exit_min,
+                    "traversal_duration_min": o.traversal_duration_min,
+                    "is_live": o.is_live,
+                    "confidence": o.confidence,
+                    "source": o.source
+                }
+                for o in db_occs
+            ]
+        else:
+            all_occs = TrainService.calculate_all_occupancies(db)
+            occupancies = [o for o in all_occs if o.get("section_id") in corridor_sec_ids]
         windows = PlanningService.generate_windows(db, corridor.id)
 
         windows_resp = []

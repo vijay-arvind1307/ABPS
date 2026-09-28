@@ -664,7 +664,64 @@ def optimize_block_request(
         }
     ]
 
-    # Update job state in DB to RECOMMENDED
+    # 5. Persist CoordinatedBlockPlan entity for this individual request
+    today_str = datetime.utcnow().strftime("%Y%m%d")
+    plan_entity = None
+    if job.coordinated_plan_id:
+        plan_entity = db.query(CoordinatedBlockPlan).filter(CoordinatedBlockPlan.id == job.coordinated_plan_id).first()
+
+    if not plan_entity:
+        base_count = db.query(CoordinatedBlockPlan).count() + 1
+        candidate_code = f"IBP-{today_str}-{base_count:03d}"
+        while db.query(CoordinatedBlockPlan).filter(CoordinatedBlockPlan.plan_code == candidate_code).first():
+            base_count += 1
+            candidate_code = f"IBP-{today_str}-{base_count:03d}"
+
+        plan_entity = CoordinatedBlockPlan(
+            plan_code=candidate_code,
+            corridor_id=corr.id if corr else None,
+            corridor_name=corr_desc,
+            section_id=job.section_id,
+            section_name=sec_name,
+            plan_date=job.requested_date or datetime.utcnow(),
+            start_min=win_start,
+            end_min=win_end,
+            duration_min=duration_m,
+            status="RECOMMENDED",
+            strategy="PLAN_A",
+            objective_score=plan_a_score,
+            conflicts_count=0,
+            blocks_saved=0,
+            possession_time_saved_min=0,
+            is_parallel=False,
+            departments_json=[job.department.name if job.department else "Track Engineering"],
+            work_breakdown_json=[{
+                "job_id": job.id,
+                "job_code": job.job_code,
+                "department": job.department.name if job.department else "Track Engineering",
+                "work_title": job.work_type,
+                "duration_min": duration_m,
+                "scheduled_time": rec_time_str
+            }],
+            alternatives_json=tradeoffs,
+            reasoning_json=reasoning,
+            created_by_id=current_user.id,
+            created_at=datetime.utcnow()
+        )
+        db.add(plan_entity)
+        db.flush()
+    else:
+        plan_entity.start_min = win_start
+        plan_entity.end_min = win_end
+        plan_entity.duration_min = duration_m
+        plan_entity.status = "RECOMMENDED"
+        plan_entity.objective_score = plan_a_score
+        plan_entity.alternatives_json = tradeoffs
+        plan_entity.reasoning_json = reasoning
+
+    # Update job state in DB to RECOMMENDED and link to plan_entity
+    job.coordinated_plan_id = plan_entity.id
+    job.coordination_status = "INDIVIDUAL"
     old_st = job.status
     job.status = "RECOMMENDED"
     job.conflicting_trains_count = 0
@@ -674,7 +731,7 @@ def optimize_block_request(
         "to_state": "RECOMMENDED",
         "acting_user": current_user.username,
         "timestamp": datetime.utcnow().isoformat(),
-        "reason": f"CP-SAT optimization generated recommended plan {rec_time_str} on {sec_name}"
+        "reason": f"CP-SAT optimization generated individual block plan {plan_entity.plan_code} ({rec_time_str}) on {sec_name}"
     })
     job.state_history_json = history
 
@@ -686,6 +743,7 @@ def optimize_block_request(
         entity_id=str(job.id),
         details_json={
             "job_code": job.job_code,
+            "plan_code": plan_entity.plan_code,
             "recommended_time": rec_time_str,
             "recommended_section": sec_name,
             "objective_score": plan_a_score,
@@ -695,9 +753,14 @@ def optimize_block_request(
     db.add(audit)
     db.commit()
 
+    serialized_plan = _serialize_coordinated_plan(plan_entity, db)
     return {
         "request_id": job.job_code,
         "job_id": job.id,
+        "id": plan_entity.id,
+        "plan_id": plan_entity.id,
+        "plan_code": plan_entity.plan_code,
+        "plan_title": f"INDIVIDUAL PLAN: {job.job_code}",
         "department": job.department.name if job.department else "Track Engineering",
         "department_code": job.department.code if job.department else "ENGG",
         "requested_corridor": corr_desc,
@@ -715,7 +778,8 @@ def optimize_block_request(
         "priority_score": job.priority_score,
         "status": "RECOMMENDED",
         "reasoning": reasoning,
-        "alternatives": tradeoffs
+        "alternatives": tradeoffs,
+        "plan": serialized_plan
     }
 
 
@@ -1383,6 +1447,17 @@ def _serialize_coordinated_plan(plan: CoordinatedBlockPlan, db: Session) -> Dict
             for j in jobs
         ]
     }
+
+
+@coordinated_router.get("")
+@router.get("/coordinated-plans")
+def list_coordinated_block_plans(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Lists all Coordinated and Individual Block Plans."""
+    plans = db.query(CoordinatedBlockPlan).order_by(CoordinatedBlockPlan.id.desc()).all()
+    return [_serialize_coordinated_plan(p, db) for p in plans]
 
 
 @coordinated_router.get("/{id}")

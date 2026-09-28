@@ -50,6 +50,8 @@ export const optimizeCoordinatedBlock = (data) =>
   api.post('/block-requests/coordination/optimize', data);
 export const optimizeRequestPool = (data = {}) =>
   api.post('/block-requests/pool/optimize', data);
+export const getCoordinatedBlockPlans = () =>
+  api.get('/coordinated-block-plans');
 export const getCoordinatedBlockPlan = (id) =>
   api.get(`/coordinated-block-plans/${id}`);
 export const approveCoordinatedBlockPlan = (id, data = {}) =>
