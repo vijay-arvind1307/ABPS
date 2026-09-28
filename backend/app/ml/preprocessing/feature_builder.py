@@ -9,10 +9,15 @@ STRICT CONSTRAINTS:
 - Missing value imputation with principled railway domain defaults.
 """
 
+from __future__ import annotations
 from datetime import datetime, date
 from typing import Dict, Any, Tuple, Optional, List
-import pandas as pd
-import numpy as np
+try:
+    import pandas as pd
+    import numpy as np
+except Exception:
+    pd = None
+    np = None
 
 from app.ml.config import (
     FEATURE_NAMES,
@@ -41,6 +46,8 @@ class MaintenanceFeatureBuilder:
             df: Single-row pandas DataFrame matching exact FEATURE_NAMES order.
             metadata: Diagnostic dict containing imputation log and feature summary.
         """
+        if pd is None:
+            raise RuntimeError("pandas is not installed in this environment")
         if reference_date is None:
             reference_date = datetime.utcnow().date()
 
