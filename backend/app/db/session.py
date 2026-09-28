@@ -11,8 +11,18 @@ connect_args = {}
 engine_kwargs = {"echo": settings.DB_ECHO}
 
 # Canonicalize SQLite path if local
-if db_url.startswith("sqlite:///./") or db_url == "sqlite:///abps.db":
-    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if os.environ.get("VERCEL") and db_url.startswith("sqlite"):
+    tmp_db = "/tmp/abps.db"
+    orig_db = os.path.join(backend_dir, "abps.db")
+    if os.path.exists(orig_db) and not os.path.exists(tmp_db):
+        try:
+            import shutil
+            shutil.copy2(orig_db, tmp_db)
+        except Exception as e:
+            print(f"[DB VERCEL] Notice copying abps.db to /tmp: {e}")
+    db_url = f"sqlite:///{tmp_db}"
+elif db_url.startswith("sqlite:///./") or db_url == "sqlite:///abps.db":
     db_file = os.path.join(backend_dir, "abps.db").replace("\\", "/")
     db_url = f"sqlite:///{db_file}"
 

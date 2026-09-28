@@ -222,10 +222,14 @@ def startup_event():
     finally:
         db.close()
 
-    # Start controlled live telemetry background poller for Tamil Nadu network
+    # Start controlled live telemetry background poller for Tamil Nadu network (skip on Vercel serverless)
     try:
-        from app.services.live_poller import start_live_poller
-        start_live_poller()
+        import os
+        if not os.environ.get("VERCEL"):
+            from app.services.live_poller import start_live_poller
+            start_live_poller()
+        else:
+            print("[STARTUP] Vercel serverless environment: skipping continuous polling loop.")
     except Exception as e:
         print(f"[STARTUP] Live poller init notice: {e}")
 

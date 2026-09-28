@@ -1,0 +1,14 @@
+.git
+venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+backend/.pytest_cache/
+backend/__pycache__/
+backend/backups/
+backend/scratch/
+frontend/node_modules/
+temp_chrome/
+scratch/
+tests/
+backend/tests/
