@@ -72,6 +72,15 @@ def login(login_req: LoginRequest, db: Session = Depends(get_db)):
     Authenticates Official User ID and Security Password, and strictly validates selected Department.
     """
     user = db.query(User).filter(User.username == login_req.username.strip()).first()
+    if not user and db.query(User).count() == 0:
+        # Auto-seed database if running on fresh/cold serverless container
+        try:
+            from app.seed_data import seed_database
+            seed_database(db)
+            user = db.query(User).filter(User.username == login_req.username.strip()).first()
+        except Exception as e:
+            print(f"[AUTH LOGIN] Auto-seed notice: {e}")
+
     if not user or not verify_password(login_req.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
